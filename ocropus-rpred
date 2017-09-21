@@ -32,6 +32,8 @@ parser.add_argument("-l","--height",default=-1,type=int,
                     help="target line height (overrides recognizer)")
 
 # recognition
+parser.add_argument('-T', '--tensorflow', action="store_true",
+                    help="Use tensorflow based model")
 parser.add_argument('-m','--model',default="en-default.pyrnn.gz",
                     help="line recognition model")
 parser.add_argument("-p","--pad",default=16,type=int,
@@ -117,11 +119,15 @@ if args.show>=0 or args.save is not None:
 # load the network used for classification
 
 try:
-    network = ocrolib.load_object(args.model,verbose=1)
-    for x in network.walk(): x.postLoad()
-    for x in network.walk():
-        if isinstance(x,lstm.LSTM):
-            x.allocate(5000)
+    if args.tensorflow:
+        import ocrolib.tensorflow as tf_backend
+        network = tf_backend.SequenceRecognizer.load(args.model)
+    else:
+        network = ocrolib.load_object(args.model,verbose=1)
+        for x in network.walk(): x.postLoad()
+        for x in network.walk():
+            if isinstance(x,lstm.LSTM):
+                x.allocate(5000)
 except FileNotFound:
     print_error("")
     print_error("Cannot find OCR model file:" + args.model)

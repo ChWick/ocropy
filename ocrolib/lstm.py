@@ -91,6 +91,17 @@ def sumouter(us,vs,lo=-1.0,hi=1.0,out=None):
         result += outer(clip(u,lo,hi),v)
     return result
 
+def sumprod(us,vs,lo=-1.0,hi=1.0,out=None):
+    """Sum the element-wise products of the `us` and `vs`.
+    Values are clipped into the range `[lo,hi]`.
+    This is mainly used for computing weight updates
+    in logistic regression layers."""
+    assert len(us[0])==len(vs[0])
+    result = out or zeros(len(us[0]))
+    for u,v in zip(us,vs):
+        result += clip(u,lo,hi)*v
+    return result
+
 class Network:
     """General interface for networks. This mainly adds convenience
     functions for `predict` and `train`.
@@ -862,7 +873,7 @@ def ctc_align_targets(outputs,targets,threshold=100.0,verbose=0,debug=0,lo=1e-5)
     return aligned
 
 def normalize_nfkc(s):
-    return unicodedata.normalize('NFC',s)
+    return unicodedata.normalize('NFKC',s)
 
 def add_training_info(network):
     return network
@@ -956,17 +967,6 @@ class SeqRecognizer:
         "Predict output as a string. This uses codec and normalizer."
         cs = self.predictSequence(xs)
         return self.l2s(cs)
-    def resizeCodec(self, codec):
-        """create a codec that exactly fits to ground truth/given codec as parameter"""
-        print("# creating a codec thas fits to the given charset")
-        # add all unknown and new chars to the codec
-        self.codec.extend(codec)
-        # search for chars that should not be in the codec anymore
-        deleted_positions = self.codec.shrink(codec)
-        # let the output fit to the new defined codec
-        self.lstm.resizeOutput(self.codec.size(), deleted_positions)
-        self.No = self.codec.size()
-        return self.codec
 
 class Codec:
     """Translate between integer codes and characters."""

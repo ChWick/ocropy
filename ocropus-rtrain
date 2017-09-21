@@ -14,7 +14,9 @@ import matplotlib.pyplot as plt
 
 import ocrolib
 import ocrolib.lstm as lstm
-from ocrolib import lineest
+import traceback
+import time
+from multiprocessing import Pool
 
 np.seterr(divide='raise',over='raise',invalid='raise',under='ignore')
 
@@ -35,6 +37,8 @@ parser.add_argument("-c","--codec",default=[],nargs='*',
                     help="construct a codec from the input text")
 
 # learning
+parser.add_argument("-T","--tensorflow",action="store_true",
+                    help="use Tensorflor LSTM and CTC backend")
 parser.add_argument("-C","--clstm",action="store_true",
                     help="use C++ LSTM")
 parser.add_argument("-r","--lrate",type=float,default=1e-4,
@@ -45,6 +49,8 @@ parser.add_argument("-o","--output",default=None,
                     help="LSTM model file")
 parser.add_argument("-F","--savefreq",type=int,default=1000,
                     help="LSTM save frequency, default: %(default)s")
+parser.add_argument("--freq_in_s", action="store_true", default=False,
+                    help="savefreq is time in seconds instead of steps")
 parser.add_argument("--strip",action="store_false",
                     help="strip the model before saving")
 parser.add_argument("-N","--ntrain",type=int,default=1000000,
@@ -59,6 +65,10 @@ parser.add_argument('--load',default=None,
                     help="start training with a previously trained model")
 parser.add_argument('--start',default=-1,type=int,
                     help="manually set the number of already learned lines, which influences the naming and stoping condition, default: %(default)s which will then be overriden by the value saved in the network")
+parser.add_argument('-B', "--batchsize", type=int, default=1,
+                    help="The number of images that will be learned in parallel")
+parser.add_argument('--threads', type=int, default=4,
+                    help="The number of threads being used for batch generation")
 
 # debugging
 parser.add_argument("-X","--exec",default="None",dest="execute",
@@ -157,7 +167,9 @@ codec = lstm.Codec().init(charset)
 # modules and new style C++ LSTM networks.
 
 def save_lstm(fname,network):
-    if args.clstm:
+    if args.tensorflow:
+        network.save(fname)
+    elif args.clstm:
         network.lstm.save(fname)
     else:
         if args.strip:
@@ -168,8 +180,11 @@ def save_lstm(fname,network):
             for x in network.walk(): x.postLoad()
 
 
-def load_lstm(fname, codec):
-    if args.clstm:
+def load_lstm(fname):
+    if args.tensorflow:
+        import ocrolib.tensorflow as tf_backend
+        network = tf_backend.SequenceRecognizer.load(fname)
+    elif args.clstm:
         network = lstm.SeqRecognizer(args.height,args.hiddensize,
             codec=codec,
             normalize=lstm.normalize_nfkc)
@@ -201,14 +216,19 @@ if args.load:
     network, codec = load_lstm(args.load, codec)
 else:
     last_save = None
-    network = lstm.SeqRecognizer(args.height,args.hiddensize,
-        codec=codec,
-        normalize=lstm.normalize_nfkc)
-    if args.clstm:
-        import clstm
-        mylstm = clstm.make_BIDILSTM()
-        mylstm.init(network.No,args.hiddensize,network.Ni)
-        network.lstm = clstm.CNetwork(mylstm)
+    if args.tensorflow:
+        import ocrolib.tensorflow as tf_backend
+        network = tf_backend.SequenceRecognizer(args.height, args.hiddensize,
+                                                codec=codec, normalize=lstm.normalize_nfkc)
+    else:
+        network = lstm.SeqRecognizer(args.height,args.hiddensize,
+            codec=codec,
+            normalize=lstm.normalize_nfkc)
+        if args.clstm:
+            import clstm
+            mylstm = clstm.make_BIDILSTM()
+            mylstm.init(network.No,args.hiddensize,network.Ni)
+            network.lstm = clstm.CNetwork(mylstm)
 
 if getattr(network,"lnorm",None) is None:
     network.lnorm = lnorm
@@ -264,7 +284,38 @@ def plot_network_info(network,transcript,pred,gta):
 
 start = args.start if args.start>=0 else network.last_trial
 
+def load_data(fname):
+    base,_ = ocrolib.allsplitext(fname)
+    line = ocrolib.read_image_gray(fname)
+    transcript = ocrolib.read_text(base+".gt.txt")
+
+    if not args.nolineest:
+        assert "dew.png" not in fname,"don't dewarp already dewarped lines"
+        network.lnorm.measure(amax(line)-line)
+        line = network.lnorm.normalize(line,cval=amax(line))
+    else:
+        assert "dew.png" in fname,"input must already be dewarped"
+
+    if line.size<10 or amax(line)==amin(line):
+        raise UserWarning("EMPTY-INPUT")
+
+
+    line = line * 1.0/amax(line)
+    line = amax(line)-line
+    line = line.T
+    if args.pad>0:
+        w = line.shape[1]
+        line = vstack([zeros((args.pad,w)),line,zeros((args.pad,w))])
+    cs = array(codec.encode(transcript),'i')
+
+    return line, cs, transcript
+
+thread_pool = Pool(processes=args.threads)
+
+global_start_time = time.time()
+last_save_time = time.time()
 for trial in range(start,args.ntrain):
+    trial_start = time.time()
     network.last_trial = trial+1
 
     do_display = (args.display>0 and trial%args.display==0)
@@ -274,46 +325,46 @@ for trial in range(start,args.ntrain):
         fname = args.moviesample
         do_update = 0
     else:
-        fname = pyrandom.sample(inputs,1)[0]
+        fname = pyrandom.sample(inputs,args.batchsize)
 
-    base,_ = ocrolib.allsplitext(fname)
+
+    # generate data
     try:
-        line = ocrolib.read_image_gray(fname)
-        transcript = ocrolib.read_text(base+".gt.txt")
-    except IOError as e:
+        if args.batchsize > 1 and args.threads > 1:
+            # workaround to support keyboard interrupt
+            data = thread_pool.map_async(load_data, fname).get(9999999)
+            # data = thread_pool.map(load_data, fname)
+        else:
+            # not parallel
+            data = map(load_data, fname)
+
+    except (IOError, UserWarning) as e:
         print("ERROR", e)
         continue
 
-    if not args.nolineest:
-        assert "dew.png" not in fname,"don't dewarp already dewarped lines"
-        network.lnorm.measure(np.amax(line)-line)
-        line = network.lnorm.normalize(line,cval=np.amax(line))
-    else:
-        assert "dew.png" in fname,"input must already be dewarped"
+    all_lines, all_cs, all_transcriptions = zip(*data)
 
-    if line.size<10 or np.amax(line)==np.amin(line):
-        print("EMPTY-INPUT")
-        continue
-    line = line * 1.0/np.amax(line)
-    line = np.amax(line)-line
-    line = line.T
-    if args.pad>0:
-        w = line.shape[1]
-        line = np.vstack([np.zeros((args.pad,w)),line,np.zeros((args.pad,w))])
-    cs = np.array(codec.encode(transcript),'i')
+
+    train_start = time.time()
     try:
-        pcs = network.trainSequence(line,cs,update=do_update,key=fname)
+        if args.tensorflow:
+            pcs = network.trainSequence(all_lines, all_cs,update=do_update,key=fname)
+        else:
+            pcs = network.trainSequence(all_lines[0], all_cs[0],update=do_update,key=fname[0])
+
+        line, cs, transcript = data[0]
     except FloatingPointError as e:
         print("# oops, got FloatingPointError", e)
         traceback.print_exc()
         network, codec = load_lstm(last_save, codec)
     except lstm.RangeError as e:
         continue
+    train_end = time.time()
     pred = "".join(codec.decode(pcs))
     acs = lstm.translate_back(network.aligned)
     gta = "".join(codec.decode(acs))
     if not args.quiet:
-        print("%d %.2f %s" % (trial, network.error, line.shape), fname)
+        print("%d %.2f %s" % (trial, network.error, line.shape), fname[0])
         print("   TRU:", repr(transcript))
         print("   ALN:", repr(gta[:len(transcript)+5]))
         print("   OUT:", repr(pred[:len(transcript)+5]))
@@ -321,11 +372,17 @@ for trial in range(start,args.ntrain):
     pred = re.sub(' ','_',pred)
     gta = re.sub(' ','_',gta)
 
-    if (trial+1)%args.savefreq==0:
+    if not args.freq_in_s and (trial+1)%args.savefreq==0:
         ofile = oname%(trial+1)+".gz"
         print("# saving", ofile)
         save_lstm(ofile,network)
         last_save = ofile
+
+    if args.freq_in_s and time.time() - last_save_time > args.savefreq:
+        ofile = oname % (time.time() - global_start_time) + ".gz"
+        save_lstm(ofile, network)
+        last_save = ofile
+        last_save_time = last_save_time + args.savefreq
 
     if do_display:
         plt.figure("training",figsize=(1400//75,800//75),dpi=75)
@@ -336,3 +393,7 @@ for trial in range(start,args.ntrain):
         if args.movie is not None:
             plt.draw()
             plt.savefig("%s-%08d.png"%(args.movie,trial),bbox_inches=0)
+    trial_end = time.time()
+    print(" * total time %f" % (trial_end - trial_start))
+    print(" * train time %f" % (train_end - train_start))
+
