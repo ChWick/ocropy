@@ -14,6 +14,7 @@ import matplotlib.pyplot as plt
 
 import ocrolib
 import ocrolib.lstm as lstm
+from ocrolib import lineest
 import traceback
 import time
 from multiprocessing import Pool
@@ -65,10 +66,12 @@ parser.add_argument('--load',default=None,
                     help="start training with a previously trained model")
 parser.add_argument('--start',default=-1,type=int,
                     help="manually set the number of already learned lines, which influences the naming and stoping condition, default: %(default)s which will then be overriden by the value saved in the network")
-parser.add_argument('-B', "--batchsize", type=int, default=1,
+parser.add_argument('-B', "--batch_size", type=int, default=1,
                     help="The number of images that will be learned in parallel")
 parser.add_argument('--threads', type=int, default=4,
                     help="The number of threads being used for batch generation")
+parser.add_argument('--preload', action="store_true", default=False,
+                    help="Load all all files into memory before running the learning algorithm.")
 
 # debugging
 parser.add_argument("-X","--exec",default="None",dest="execute",
@@ -180,7 +183,7 @@ def save_lstm(fname,network):
             for x in network.walk(): x.postLoad()
 
 
-def load_lstm(fname):
+def load_lstm(fname, codec):
     if args.tensorflow:
         import ocrolib.tensorflow as tf_backend
         network = tf_backend.SequenceRecognizer.load(fname)
@@ -291,30 +294,50 @@ def load_data(fname):
 
     if not args.nolineest:
         assert "dew.png" not in fname,"don't dewarp already dewarped lines"
-        network.lnorm.measure(amax(line)-line)
-        line = network.lnorm.normalize(line,cval=amax(line))
+        network.lnorm.measure(np.amax(line)-line)
+        line = network.lnorm.normalize(line,cval=np.amax(line))
     else:
         assert "dew.png" in fname,"input must already be dewarped"
 
-    if line.size<10 or amax(line)==amin(line):
+    if line.size < 10 or np.amax(line) == np.amin(line):
         raise UserWarning("EMPTY-INPUT")
 
 
-    line = line * 1.0/amax(line)
-    line = amax(line)-line
+    line = line * 1.0/np.amax(line)
+    line = np.amax(line)-line
     line = line.T
     if args.pad>0:
         w = line.shape[1]
-        line = vstack([zeros((args.pad,w)),line,zeros((args.pad,w))])
-    cs = array(codec.encode(transcript),'i')
+        line = np.vstack([np.zeros((args.pad,w)),line,np.zeros((args.pad,w))])
+    cs = np.array(codec.encode(transcript),'i')
 
-    return line, cs, transcript
+    return fname, line, cs, transcript
+
 
 thread_pool = Pool(processes=args.threads)
+
+loaded_data = {}
+if args.preload:
+    print("Preloading data, this might take a while")
+    if args.batch_size > 1 and args.threads > 1:
+        data = thread_pool.map_async(load_data, inputs).get(9999999)
+    else:
+        data = map(load_data, inputs)
+
+    for fname, line, cs, transcript in data:
+        loaded_data[fname] = (line, cs, transcript)
+
+    print("All data loaded")
+
 
 global_start_time = time.time()
 last_save_time = time.time()
 for trial in range(start,args.ntrain):
+    #if (trial + 1) % 100000 == 0:
+    #    args.lrate *= 0.1
+    #    print("Settings learning rate to %f" % args.lrate)
+    #    network.setLearningRate(args.lrate)
+
     trial_start = time.time()
     network.last_trial = trial+1
 
@@ -325,12 +348,15 @@ for trial in range(start,args.ntrain):
         fname = args.moviesample
         do_update = 0
     else:
-        fname = pyrandom.sample(inputs,args.batchsize)
+        fname = pyrandom.sample(inputs,args.batch_size)
 
 
     # generate data
     try:
-        if args.batchsize > 1 and args.threads > 1:
+        if args.preload:
+            # use preloaded data
+            data = [loaded_data[name] for name in fname]
+        elif args.batch_size > 1 and args.threads > 1:
             # workaround to support keyboard interrupt
             data = thread_pool.map_async(load_data, fname).get(9999999)
             # data = thread_pool.map(load_data, fname)
@@ -361,16 +387,16 @@ for trial in range(start,args.ntrain):
         continue
     train_end = time.time()
     pred = "".join(codec.decode(pcs))
-    acs = lstm.translate_back(network.aligned)
-    gta = "".join(codec.decode(acs))
+    #acs = lstm.translate_back(network.aligned)
+    #gta = "".join(codec.decode(acs))
     if not args.quiet:
-        print("%d %.2f %s" % (trial, network.error, line.shape), fname[0])
+        print("%d %.6f %.6f %s" % (trial, np.mean(network.error_log), np.mean(network.cerror_log), line.shape), fname[0])
         print("   TRU:", repr(transcript))
-        print("   ALN:", repr(gta[:len(transcript)+5]))
+        #print("   ALN:", repr(gta[:len(transcript)+5]))
         print("   OUT:", repr(pred[:len(transcript)+5]))
 
     pred = re.sub(' ','_',pred)
-    gta = re.sub(' ','_',gta)
+    #gta = re.sub(' ','_',gta)
 
     if not args.freq_in_s and (trial+1)%args.savefreq==0:
         ofile = oname%(trial+1)+".gz"

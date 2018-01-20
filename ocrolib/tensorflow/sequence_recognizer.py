@@ -21,7 +21,6 @@ class SequenceRecognizer:
         self.Ni = Ni
         if codec: No = codec.size()
         self.No = No + 1
-        self.learning_rate = 1e-2
         self.debug_align = 0
         self.normalize = normalize
         self.codec = codec
@@ -32,12 +31,16 @@ class SequenceRecognizer:
             self.lnorm = lineest.CenterNormalizer()
 
         if load_file is not None:
-            self.model = Model.load(load_file, learning_rate=self.learning_rate)
+            self.model = Model.load(load_file)
         else:
-            self.model = Model.create(self.Ni, nstates, self.No, learning_rate=self.learning_rate)
+            model_settings = Model.default_model_settings()
+            model_settings['lstm'] = [nstates]
+            self.model = Model.create(self.Ni, self.No, Model.default_model_settings())
         self.command_log = []
         self.error_log = []
         self.cerror_log = []
+        self.cerror_log_max_size = 1000
+        self.error_log_max_size = 1000
         self.key_log = []
         self.last_trial = 0
 
@@ -74,21 +77,23 @@ class SequenceRecognizer:
         self.net.info()
 
     def setLearningRate(self, r, momentum=0.9):
-        self.model.learning_rate = r
+        self.model.default_learning_rate = r
 
     def predictSequence(self,xs):
         "Predict an integer sequence of codes."
         assert(xs.shape[1]==self.Ni, "wrong image height (image: %d, expected: %d)"%(xs.shape[1],self.Ni))
         # only one batch
-        self.outputs = self.model.predict_sequence([xs])[0]
-        return translate_back(self.outputs)
+        self.outputs, self.aligned = self.model.predict_sequence([xs])
+        self.aligned = self.aligned[0]
+        return self.aligned
 
     def trainSequence(self,xs,cs,update=1,key=None):
         "Train with an integer sequence of codes."
+        print(len(xs[0]), len(cs[0]))
         for x in xs: assert(x.shape[-1] == self.Ni, "wrong image height")
         start_time = time.time()
-        cost, self.outputs = self.model.train_sequence(xs, cs)
-        print("LSTM-CTC train step took %f s" % (time.time() - start_time))
+        cost, self.outputs, ler, decoded = self.model.train_sequence(xs, cs)
+        print("LSTM-CTC train step took %f s, with ler=%f" % (time.time() - start_time, ler))
         assert(len(xs) == self.outputs.shape[0])
         assert(self.outputs.shape[-1] == self.No)
 
@@ -97,21 +102,24 @@ class SequenceRecognizer:
         cs = cs[0]
         self.outputs = self.outputs[0]
 
-        result = translate_back(self.outputs)
+        self.aligned = decoded[0]
 
-        self.targets = np.array(make_target(cs, self.No))
-        self.aligned = np.array(ctc_align_targets(self.outputs,self.targets,debug=self.debug_align))
-
-        self.error = np.sum(cost ** 2)
-        self.error_log.append(self.error ** .5 / len(cs))
+        self.error = cost
+        self.error_log.append(cost)
         # compute class error
-        self.cerror = levenshtein(cs, result)
-        self.cerror_log.append((self.cerror, len(cs)))
+        self.cerror = ler
+        self.cerror_log.append(ler)
+
+        if len(self.error_log) > self.error_log_max_size:
+            del self.error_log[0]
+
+        if len(self.cerror_log) > self.cerror_log_max_size:
+            del self.cerror_log[0]
 
         # training keys
         self.key_log.append(key)
 
-        return result
+        return decoded[0]
 
     # we keep track of errors within the object; this even gets
     # saved to give us some idea of the training history
