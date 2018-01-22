@@ -34,7 +34,6 @@ class SequenceRecognizer:
             self.model = Model.load(load_file)
         else:
             model_settings = Model.default_model_settings()
-            model_settings['lstm'] = [nstates]
             self.model = Model.create(self.Ni, self.No, Model.default_model_settings())
         self.command_log = []
         self.error_log = []

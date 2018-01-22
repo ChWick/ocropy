@@ -108,7 +108,7 @@ if (total>0):
 
 if args.confusion>0:
     for (a,b),v in counts.most_common(args.confusion):
-        print("%d\t%s\t%s" % (v, a, b))
+        print("%d\t%s\t%s" % (v, a.encode("utf-8"), b.encode("utf-8")))
 
 if (total>0):
     print(errs * 1.0 / total)

@@ -1,0 +1,351 @@
+import argparse
+import multiprocessing
+import os
+import re
+import shutil
+import subprocess
+
+# only one thread to train, do not use GPU
+os.environ['OMP_NUM_THREADS'] = "1"
+os.environ['CUDA_VISIBLE_DEVICES'] = ""
+
+parser = argparse.ArgumentParser()
+
+# folds setup
+parser.add_argument("--root_dir", type=str, default="",
+                    help="Expectes a 'data' dir as sub dir. The data dir must contain a dir for each fold "
+                         "labeled by a number")
+parser.add_argument("--single_fold", type=str, default="",
+                    help="If a positive number only run the specific fold, instead of all")
+parser.add_argument("--verbose", action="store_true",
+                    help="Verbose mode print all output of the several programs to the console. It is always written "
+                    "to log files")
+parser.add_argument("--n_parallel", type=int, default=-1,
+                    help="Number of parallel models to run. Defaults to the number of folds")
+
+# training setup
+parser.add_argument("--skip_train", action="store_true")
+parser.add_argument("--rtrain", type=str, default="ocropus-rtrain")
+parser.add_argument("--ntrain", type=int, default=30000,
+                    help="# lines to train before stopping, default: %(default)s")
+parser.add_argument("--tensorflow", action='store_true')
+parser.add_argument("--model_prefix", type=str, default="",
+                    help="A optional prefix to label models")
+
+# testing setup
+parser.add_argument("--skip_test", action="store_true")
+parser.add_argument("--rpred", type=str, default="ocropus-rpred")
+parser.add_argument("--econf", type=str, default="ocropus-econf")
+
+
+# evaluate best models
+parser.add_argument("--skip_eval_best", action="store_true")
+parser.add_argument("--eval_data", type=str,
+                    help="Path to the evaluation data")
+
+
+# parse args and clean data
+args = parser.parse_args()
+
+args.root_dir = os.path.abspath(os.path.expanduser(args.root_dir))
+args.rtrain = os.path.abspath(os.path.expanduser(args.rtrain))
+args.rpred = os.path.abspath(os.path.expanduser(args.rpred))
+args.econf = os.path.abspath(os.path.expanduser(args.econf))
+data_dir = os.path.join(args.root_dir, 'data')
+best_models_dir = os.path.join(args.root_dir, '%s_best_models' % args.model_prefix)
+
+tensorflow_arg = "--tensorflow" if args.tensorflow else ""
+
+number_check_re = re.compile("[\d]+")
+
+if not args.skip_eval_best:
+    if not args.eval_data:
+        raise Exception("Required argument '--eval_data' missing")
+
+    args.eval_data = os.path.abspath(os.path.expanduser(args.eval_data))
+    if not os.path.exists(args.eval_data):
+        raise Exception("Evaluation dir does not exist at '%s'" % args.eval_data)
+
+
+def mkdir(path):
+    if not os.path.exists(path):
+        print("Creating dir %s" % path)
+        os.makedirs(path)
+
+
+def symlink(source, name, is_dir=True):
+    if not os.path.exists(name):
+        print("Creating symlink %s->%s" % (name, source))
+        os.symlink(source, name, target_is_directory=is_dir)
+
+
+def run(command):
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, shell=False)
+    while True:
+        line = process.stdout.readline().rstrip().decode("utf-8")
+        if not line:
+            break
+
+        yield line
+
+
+if not os.path.isdir(args.root_dir):
+    raise Exception("Root dir %s does not exist." % args.root_dir)
+
+if not os.path.isdir(data_dir):
+    raise Exception("Expected 'data' dir at root dir '%s': %s not found" % (args.root_dir, data_dir))
+
+print("Using data dir at '%s'" % data_dir)
+
+data_fold_dirs_ = [d for d in sorted(os.listdir(data_dir))
+                   if os.path.isdir(os.path.join(data_dir, d)) and number_check_re.match(d)]
+
+print("Found %d folds" % len(data_fold_dirs_))
+print("Setting up training and test fold dirs")
+
+fold_root_dir = os.path.join(args.root_dir, 'folds')
+mkdir(fold_root_dir)
+
+
+def setup_dirs():
+    base_dir = os.path.abspath(os.curdir)
+
+    for fold_dir_ in data_fold_dirs_:
+        print("Setting up fold %s" % fold_dir_)
+        fold_dir = os.path.join(fold_root_dir, fold_dir_)
+        train_dir = os.path.join(fold_dir, 'train')
+        test_dir = os.path.join(fold_dir, 'test')
+        models_dir = os.path.join(fold_dir, 'models')
+
+        train_fold_dirs_ = data_fold_dirs_[:]
+        train_fold_dirs_.remove(fold_dir_)
+
+        mkdir(fold_dir)
+        mkdir(train_dir)
+        mkdir(test_dir)
+        mkdir(models_dir)
+
+        # create relative syslinks
+        os.chdir(train_dir)
+        for p in train_fold_dirs_:
+            symlink(os.path.join("..", "..", "..", "data", p), p)
+
+        os.chdir(test_dir)
+        symlink(os.path.join("..", "..", "..", "data", fold_dir_), fold_dir_)
+
+    os.chdir(base_dir)
+
+
+setup_dirs()
+
+print("All directories created")
+
+if len(args.single_fold) > 0:
+    if args.single_fold not in data_fold_dirs_:
+        raise Exception("Single fold dir '%s' not a valid fold: Valid folds are %s"
+                        % (args.single_fold, data_fold_dirs_))
+
+    data_fold_dirs_ = [args.single_fold]
+
+fold_dirs = [os.path.join(fold_root_dir, fold_dir_) for fold_dir_ in data_fold_dirs_]
+
+if args.n_parallel <= 0:
+    args.n_parallel = len(fold_dirs)
+
+
+
+# training function that can be parallel
+def train_single_fold(fold_dir):
+    print("Running training for fold '%s'" % fold_dir)
+    assert(os.path.exists(fold_dir))
+
+    train_dir = os.path.join(fold_dir, 'train')
+    models_dir = os.path.join(fold_dir, 'models')
+    train_log = os.path.join(fold_dir, '%s_train.log' % args.model_prefix)
+
+    with open(train_log, 'w') as train_log_file:
+        for line in run(["python2", args.rtrain, tensorflow_arg, "--preload",
+                                    # "--threads", 1, "--batch_size", 1, "-r", "1e-3",
+                                    "--ntrain", str(args.ntrain),
+                                    "--codec", os.path.join(train_dir, "*", "*.gt.txt"),
+                                    "-o", os.path.join(models_dir, args.model_prefix),
+                                    os.path.join(train_dir, "*", "*.png"),
+                                    ]):
+            if args.verbose:
+                print("Fold %s: %s" % (fold_dir, line.strip()))
+            train_log_file.write(line + "\n")
+            train_log_file.flush()
+
+    print("Finished training for fold '%s'" % fold_dir)
+
+
+print("Starting the training")
+
+if args.skip_train:
+    print("Skipping")
+elif args.n_parallel <= 1:
+    list(map(train_single_fold, fold_dirs))
+else:
+    multi_pool = multiprocessing.Pool(args.n_parallel)
+    r = multi_pool.map(train_single_fold, fold_dirs)
+
+print("Training Finished")
+
+
+print("Running models on test set")
+
+
+def list_models(models_dir, file_ending="pyrnn.gz"):
+    return sorted([f for f in os.listdir(models_dir) if f.startswith(args.model_prefix) and f.endswith(file_ending)])
+
+
+# prerequisites, all splits have equal amount of models
+number_of_models = len(list_models(os.path.join(fold_dirs[0], 'models')))
+for fold_dir in fold_dirs:
+    this_number_of_models = len(list_models(os.path.join(fold_dirs[0], 'models')))
+    if this_number_of_models != number_of_models:
+        raise Exception("Mismatch in number of models of fold '%s': %d  vs %d"
+                        % (fold_dir, this_number_of_models, number_of_models))
+
+if number_of_models == 0:
+    raise Exception("No models to test found!")
+
+
+mkdir(best_models_dir)
+
+
+def copy_model(model, models_dir, output_name, output_dir):
+    assert(os.path.exists(models_dir))
+    assert(os.path.exists(output_dir))
+    model_files = [f for f in os.listdir(models_dir) if f.startswith(model)]
+
+    for model_file in model_files:
+        output_file = model_file.replace(model, output_name)
+        shutil.copyfile(os.path.join(models_dir, model_file),
+                        os.path.join(output_dir, output_file))
+
+
+eval_lines_to_extract = ["errors", "missing", "total", "err", "errnomiss"]
+
+
+def extract_line_data(output):
+    line_data = {}
+    for line in output.split("\n"):
+        split = line.split()
+        if len(split) <= 1:
+            continue
+
+        if split[0] in eval_lines_to_extract:
+            line_data[split[0]] = split[1]
+
+    return line_data
+
+
+def test_single_fold(fold_dir):
+    fold = os.path.basename(os.path.normpath(fold_dir))
+    print("Running testing for fold '%s'" % fold_dir)
+    assert(os.path.exists(fold_dir))
+
+    test_dir = os.path.join(fold_dir, 'test')
+    models_dir = os.path.join(fold_dir, 'models')
+    test_log = os.path.join(fold_dir, '%s_test.log' % args.model_prefix)
+    eval_csv = os.path.join(fold_dir, '%s_eval.csv' % args.model_prefix)
+
+    with open(test_log, 'w') as test_log_file, open(eval_csv, 'w') as eval_csv_file:
+        all_models = list_models(models_dir)
+        eval_csv_file.write("model," + ",".join(eval_lines_to_extract) + "\n")
+
+        current_best_model = ""
+        current_best_error = 1000
+
+        for model in all_models:
+            print("Fold %s: Testing model %s" % (fold_dir, model))
+            model_path = os.path.join(models_dir, model)
+            for line in run(["python2", args.rpred, tensorflow_arg,
+                             "-m", model_path,
+                             os.path.join(test_dir, "*", "*.png")]):
+                if args.verbose:
+                    print("Fold %s: %s" % (fold_dir, line.strip()))
+                test_log_file.write(line + "\n")
+                test_log_file.flush()
+
+            print("Fold %s: Running econf of model %s" % (fold_dir, model))
+            process = subprocess.Popen(["python2", args.econf,
+                                        os.path.join(test_dir, "*", "*.gt.txt")],
+                                       stdout=subprocess.PIPE)
+            out, err = process.communicate()
+            output = out.decode("utf-8")
+            if args.verbose:
+                print(output)
+            test_log_file.write(output + "\n")
+            test_log_file.flush()
+
+            line_data = extract_line_data(output)
+            eval_csv_file.write(model + "," + ",".join([line_data[title] for title in eval_lines_to_extract]) + "\n")
+
+            error = float(line_data["err"])
+            if float(error) <= current_best_error:
+                current_best_model = model
+                current_best_error = float(error)
+
+            print(output.split("\n")[-1])
+
+        print("Fold %s: Best model is %s with error of %s %%" % (fold_dir, current_best_model, current_best_error))
+        copy_model(current_best_model, models_dir, "%s_%s.pyrnn.gz" % (args.model_prefix, fold), best_models_dir)
+        print("Copied best model to %s" % best_models_dir)
+
+    print("Finished testing for fold '%s'" % fold_dir)
+
+
+if args.skip_test:
+    print("Skipping")
+elif args.n_parallel <= 1:
+    list(map(test_single_fold, fold_dirs))
+else:
+    multi_pool = multiprocessing.Pool(args.n_parallel)
+    multi_pool.map(test_single_fold, fold_dirs)
+
+print("Testing Finished")
+
+
+print("Starting evaluation of best models")
+
+best_models = list_models(best_models_dir)
+
+
+def eval_single_model(model_path):
+    print("Testing %s" % model_path)
+
+    for line in run(["python2", args.rpred, tensorflow_arg,
+                     "-m", model_path,
+                     os.path.join(args.eval_data, "*.png")]):
+        if args.verbose:
+            print("Fold %s: %s" % (fold_dir, line.strip()))
+
+    print("Evaluating %s" % model_path)
+    process = subprocess.Popen(["python2", args.econf,
+                                os.path.join(args.eval_data, "*.gt.txt")],
+                               stdout=subprocess.PIPE)
+    out, err = process.communicate()
+    output = out.decode("utf-8")
+    if args.verbose:
+        print(output)
+
+    line_data = extract_line_data(output)
+
+    return float(line_data["err"])
+
+
+if args.skip_eval_best:
+    print("Skipping")
+else:
+    with open(os.path.join(args.root_dir, "%s_eval.csv" % args.model_prefix), 'w') as eval_file:
+        eval_file.write("model,err\n")
+
+        for best_model in best_models:
+            err = eval_single_model(os.path.join(best_models_dir, best_model))
+            eval_file.write("%s,%f\n" % (best_model, err))
+            print("%s, %f" % (best_model, err))
+
+
+print("Evaluation finished")

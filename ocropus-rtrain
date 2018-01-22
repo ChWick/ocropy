@@ -156,9 +156,10 @@ else:
     charset = sorted(list(set(list(lstm.ascii_labels) + list(ocrolib.chars.default))))
 
 charset = [""," ","~",]+[c for c in charset if c not in [" ","~"]]
+
 print("# charset size", len(charset), end=' ')
 if len(charset)<200:
-    print("[" + "".join(charset) + "]")
+    print("[" + u"".join(charset).encode("utf-8") + "]")
 else:
     s = "".join(charset)
     print("[" + s[:20], "...", s[-20:] + "]")

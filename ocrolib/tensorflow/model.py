@@ -11,17 +11,29 @@ class Model:
         return {
             "conv_pool": [
                 {
-                    "filters": 20,
-                    "kernel_size": [3, 3],
+                    "filters": 80,
+                    "kernel_size": [7, 7],
                     "pool_size": [2, 2],
                 },
                 {
-                    "filters": 40,
-                    "kernel_size": [3, 3],
+                    "filters": 80,
+                    "kernel_size": [7, 7],
                     "pool_size": [2, 2],
                 },
+                {
+                    "filters": 80,
+                    "kernel_size": [7, 7],
+                    "pool_size": [1, 2],
+                },
+                {
+                    "filters": 80,
+                    "kernel_size": [7, 7],
+                    "pool_size": [1, 2],
+                }
             ],
-            "lstm": [100],
+            "lstm": [
+                #100
+            ],
             "use_peepholes": False,
         }
 
@@ -94,35 +106,42 @@ class Model:
                     cnn_seq_len, cnn_features = (2, int(int(num_features / 2) / 2))
                     lstm_seq_len = tf.to_int32((tf.to_int32(seq_len / 2) / 2))
                     #rnn_inputs = tf.reshape(pool1, [batch_size, tf.shape(output)[1], model_settings["conv_pool"][-1]["filters"] * cnn_features])
-                    rnn_inputs = tf.reshape(pool_layers[-1], [batch_size, tf.shape(pool_layers[-1])[1], 40 * 12])
+                    rnn_inputs = tf.reshape(pool_layers[-1],
+                                            [batch_size, tf.shape(pool_layers[-1])[1],
+                                             model_settings["conv_pool"][-1]["filters"] * 3])
 
                 else:
                     rnn_inputs = inputs
                     lstm_seq_len = seq_len
 
-                def get_lstm_cell(num_hidden, use_peepholse=model_settings["use_peepholes"]):
-                    return LSTMCell(num_hidden,
-                                    use_peepholes=use_peepholse,
-                                    reuse=reuse_variables,
-                                    initializer=tf.initializers.random_uniform(-0.1, 0.1),
-                                    #cell_clip=20,
-                                    #proj_clip=20,
-                                    #activation=tf.sigmoid,
-                                    )
+                if len(model_settings["lstm"]) > 0:
+                    def get_lstm_cell(num_hidden, use_peepholse=model_settings["use_peepholes"]):
+                        return LSTMCell(num_hidden,
+                                        use_peepholes=use_peepholse,
+                                        reuse=reuse_variables,
+                                        initializer=tf.initializers.random_uniform(-0.1, 0.1),
+                                        #cell_clip=20,
+                                        #proj_clip=20,
+                                        #activation=tf.sigmoid,
+                                        )
 
-                for i, lstm_hidden in enumerate(model_settings['lstm']):
-                    fw, bw = get_lstm_cell(lstm_hidden), get_lstm_cell(lstm_hidden)
-                    (output_fw, output_bw), _ \
-                        = rnn.bidirectional_dynamic_rnn(fw, bw, rnn_inputs, lstm_seq_len,
-                                                        dtype=tf.float32, scope=scope.name + "BiRNN%d" % i)
-                    rnn_inputs = tf.concat((output_fw, output_bw), 2)
+                    for i, lstm_hidden in enumerate(model_settings['lstm']):
+                        fw, bw = get_lstm_cell(lstm_hidden), get_lstm_cell(lstm_hidden)
+                        (output_fw, output_bw), _ \
+                            = rnn.bidirectional_dynamic_rnn(fw, bw, rnn_inputs, lstm_seq_len,
+                                                            dtype=tf.float32, scope=scope.name + "BiRNN%d" % i)
+                        rnn_inputs = tf.concat((output_fw, output_bw), 2)
+
+                    output_size = model_settings['lstm'][-1] * 2
+                else:
+                    output_size = model_settings["conv_pool"][-1]["filters"] * 3
 
                 outputs = rnn_inputs
 
                 # flatten to (N * T, F) for matrix multiplication. This will be reversed later
                 outputs = tf.reshape(outputs, [-1, outputs.shape.as_list()[2]])
 
-                W = tf.get_variable('W', initializer=tf.random_uniform([model_settings['lstm'][-1] * 2, num_classes], -0.1, 0.1))
+                W = tf.get_variable('W', initializer=tf.random_uniform([output_size, num_classes], -0.1, 0.1))
                 b = tf.get_variable('B', initializer=tf.constant(0., shape=[num_classes]))
 
                 logits = tf.matmul(outputs, W) + b
