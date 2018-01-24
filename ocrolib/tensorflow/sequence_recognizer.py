@@ -80,11 +80,16 @@ class SequenceRecognizer:
 
     def predictSequence(self,xs):
         "Predict an integer sequence of codes."
-        assert(xs.shape[1]==self.Ni, "wrong image height (image: %d, expected: %d)"%(xs.shape[1],self.Ni))
+        assert(xs.shape[1]==self.Ni, "wrong image height (image: %d, expected: %d)" % (xs.shape[1], self.Ni))
         # only one batch
-        self.outputs, self.aligned = self.model.predict_sequence([xs])
+        self.outputs, self.aligned = self.model.decode_sequence([xs])
         self.aligned = self.aligned[0]
-        return self.aligned
+        return self.output, self.aligned
+
+    def predict_probabilities(self, xs):
+        logits, seq_len = self.model.predict_sequence(xs)
+        return logits, seq_len
+
 
     def trainSequence(self,xs,cs,update=1,key=None):
         "Train with an integer sequence of codes."

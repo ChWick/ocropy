@@ -289,30 +289,35 @@ def plot_network_info(network,transcript,pred,gta):
 start = args.start if args.start>=0 else network.last_trial
 
 def load_data(fname):
-    base,_ = ocrolib.allsplitext(fname)
-    line = ocrolib.read_image_gray(fname)
-    transcript = ocrolib.read_text(base+".gt.txt")
+    try:
+        base,_ = ocrolib.allsplitext(fname)
+        line = ocrolib.read_image_gray(fname)
+        transcript = ocrolib.read_text(base+".gt.txt")
 
-    if not args.nolineest:
-        assert "dew.png" not in fname,"don't dewarp already dewarped lines"
-        network.lnorm.measure(np.amax(line)-line)
-        line = network.lnorm.normalize(line,cval=np.amax(line))
-    else:
-        assert "dew.png" in fname,"input must already be dewarped"
+        if not args.nolineest:
+            assert "dew.png" not in fname,"don't dewarp already dewarped lines"
+            network.lnorm.measure(np.amax(line)-line)
+            line = network.lnorm.normalize(line,cval=np.amax(line))
+        else:
+            assert "dew.png" in fname,"input must already be dewarped"
 
-    if line.size < 10 or np.amax(line) == np.amin(line):
-        raise UserWarning("EMPTY-INPUT")
+        if line.size < 10 or np.amax(line) == np.amin(line):
+            raise UserWarning("EMPTY-INPUT")
 
 
-    line = line * 1.0/np.amax(line)
-    line = np.amax(line)-line
-    line = line.T
-    if args.pad>0:
-        w = line.shape[1]
-        line = np.vstack([np.zeros((args.pad,w)),line,np.zeros((args.pad,w))])
-    cs = np.array(codec.encode(transcript),'i')
+        line = line * 1.0/np.amax(line)
+        line = np.amax(line)-line
+        line = line.T
+        if args.pad>0:
+            w = line.shape[1]
+            line = np.vstack([np.zeros((args.pad,w)),line,np.zeros((args.pad,w))])
+        cs = np.array(codec.encode(transcript),'i')
 
-    return fname, line, cs, transcript
+        return fname, line, cs, transcript
+    except Exception as e:
+        # Skip invalid lines
+        print(e)
+        return fname, None, None, None
 
 
 thread_pool = Pool(processes=args.threads)
@@ -326,9 +331,12 @@ if args.preload:
         data = map(load_data, inputs)
 
     for fname, line, cs, transcript in data:
-        loaded_data[fname] = (line, cs, transcript)
+        if line is not None:
+            loaded_data[fname] = (line, cs, transcript)
+        else:
+            inputs.remove(fname)
 
-    print("All data loaded")
+    print("All data loaded: size %s" % len(inputs))
 
 
 global_start_time = time.time()

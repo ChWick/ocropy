@@ -11,28 +11,18 @@ class Model:
         return {
             "conv_pool": [
                 {
-                    "filters": 80,
-                    "kernel_size": [7, 7],
+                    "filters": 40,
+                    "kernel_size": [3, 3],
                     "pool_size": [2, 2],
                 },
                 {
-                    "filters": 80,
-                    "kernel_size": [7, 7],
+                    "filters": 60,
+                    "kernel_size": [3, 3],
                     "pool_size": [2, 2],
                 },
-                {
-                    "filters": 80,
-                    "kernel_size": [7, 7],
-                    "pool_size": [1, 2],
-                },
-                {
-                    "filters": 80,
-                    "kernel_size": [7, 7],
-                    "pool_size": [1, 2],
-                }
             ],
             "lstm": [
-                #100
+                100
             ],
             "use_peepholes": False,
         }
@@ -42,7 +32,8 @@ class Model:
         print("Loading tensorflow model from root %s" % filename)
         graph = tf.Graph()
         with graph.as_default() as g:
-            session = tf.Session(graph=graph)
+            session = tf.Session(graph=graph,
+                                 config=tf.ConfigProto(intra_op_parallelism_threads=10))
             with tf.variable_scope("", reuse=False) as scope:
 
                 saver = tf.train.import_meta_graph(filename + '.meta')
@@ -51,6 +42,12 @@ class Model:
                 l_rate = g.get_tensor_by_name("l_rate:0")
                 inputs = g.get_tensor_by_name("inputs:0")
                 seq_len = g.get_tensor_by_name("seq_len:0")
+                try:
+                    seq_len_out = g.get_tensor_by_name("seq_len_out:0")
+                except:
+                    print("loaded old model!")
+                    seq_len_out = seq_len / 4
+
                 targets = tf.SparseTensor(
                     g.get_tensor_by_name("targets/indices:0"),
                     g.get_tensor_by_name("targets/values:0"),
@@ -65,13 +62,16 @@ class Model:
                     )
                 logits = g.get_tensor_by_name("softmax:0")
 
-                return Model(graph, session, inputs, seq_len, targets, train_op, cost, ler, decoded, logits, l_rate)
+                return Model(graph, session, inputs, seq_len, seq_len_out, targets, train_op, cost, ler, decoded, logits, l_rate)
 
     @staticmethod
     def create(num_features, num_classes, model_settings, reuse_variables=False):
         graph = tf.Graph()
         with graph.as_default():
-            session = tf.Session(graph=graph)
+            session = tf.Session(graph=graph,
+                                 config=tf.ConfigProto(intra_op_parallelism_threads=1,
+                                                       inter_op_parallelism_threads=1,
+                                                       ))
 
             inputs = tf.placeholder(tf.float32, shape=(None, None, num_features), name="inputs")
             batch_size = tf.shape(inputs)[0]
@@ -108,7 +108,7 @@ class Model:
                     #rnn_inputs = tf.reshape(pool1, [batch_size, tf.shape(output)[1], model_settings["conv_pool"][-1]["filters"] * cnn_features])
                     rnn_inputs = tf.reshape(pool_layers[-1],
                                             [batch_size, tf.shape(pool_layers[-1])[1],
-                                             model_settings["conv_pool"][-1]["filters"] * 3])
+                                             model_settings["conv_pool"][-1]["filters"] * 12])
 
                 else:
                     rnn_inputs = inputs
@@ -134,7 +134,7 @@ class Model:
 
                     output_size = model_settings['lstm'][-1] * 2
                 else:
-                    output_size = model_settings["conv_pool"][-1]["filters"] * 3
+                    output_size = model_settings["conv_pool"][-1]["filters"] * 12
 
                 outputs = rnn_inputs
 
@@ -184,13 +184,16 @@ class Model:
                                    tf.local_variables_initializer())
                 session.run(init_op)
 
-                return Model(graph, session, inputs, seq_len, targets, train_op, cost, ler, sparse_decoded, softmax, l_rate)
+                lstm_seq_len = tf.identity(lstm_seq_len, "seq_len_out")
 
-    def __init__(self, graph, session, inputs, seq_len, targets, optimizer, cost, ler, sparse_decoded, logits, l_rate):
+                return Model(graph, session, inputs, seq_len, lstm_seq_len, targets, train_op, cost, ler, sparse_decoded, softmax, l_rate)
+
+    def __init__(self, graph, session, inputs, seq_len, seq_len_out, targets, optimizer, cost, ler, sparse_decoded, logits, l_rate):
         self.graph = graph
         self.session = session
         self.inputs = inputs
         self.seq_len = seq_len
+        self.seq_len_out = seq_len_out
         self.targets = targets
         self.optimizer = optimizer
         self.cost = cost
@@ -284,6 +287,12 @@ class Model:
         return cost, logits, ler, Model.sparse_to_lists(decoded, shift_values=1)
 
     def predict_sequence(self, x):
+        x, len_x = self.sparse_data_to_dense(x)
+        logits, seq_len_out = self.session.run([self.logits, self.seq_len_out], feed_dict={self.inputs: x, self.seq_len: len_x})
+        logits = np.roll(logits, 1, axis=2)
+        return logits, seq_len_out
+
+    def decode_sequence(self, x):
         x, len_x = self.sparse_data_to_dense(x)
         logits, decoded, = self.session.run([self.logits, self.decoded], feed_dict={self.inputs: x, self.seq_len: len_x})
         logits = np.roll(logits, 1, axis=2)
