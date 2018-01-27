@@ -9,15 +9,19 @@ import matplotlib.pyplot as plt
 
 class SequenceRecognizer:
     @staticmethod
-    def load(fname):
+    def load(fname, pretrained=False, codec=None):
         import ocrolib
         data = ocrolib.load_object(fname)
         data["load_file"] = fname
+        if codec:
+            # overwrite codec with new codec
+            data["codec"] = codec
+        data["pretrained"] = pretrained
         print(data)
         return SequenceRecognizer(**data)
 
     """Perform sequence recognition using BIDILSTM and alignment."""
-    def __init__(self, Ni, nstates=-1, No=-1, codec=None, normalize=normalize_nfkc, load_file=None, lnorm=None):
+    def __init__(self, Ni, nstates=-1, No=-1, codec=None, normalize=normalize_nfkc, load_file=None, lnorm=None, pretrained=False, model_settings=None):
         self.Ni = Ni
         if codec: No = codec.size()
         self.No = No + 1
@@ -30,11 +34,18 @@ class SequenceRecognizer:
         else:
             self.lnorm = lineest.CenterNormalizer()
 
+        self.model_settings = model_settings
+        if self.model_settings is None:
+            self.model_settings = Model.default_model_settings()
+
         if load_file is not None:
-            self.model = Model.load(load_file)
+            if pretrained:
+                self.model = Model.create(self.Ni, self.No, self.model_settings)
+                self.model.load_weights(load_file)
+            else:
+                self.model = Model.load(load_file)
         else:
-            model_settings = Model.default_model_settings()
-            self.model = Model.create(self.Ni, self.No, Model.default_model_settings())
+            self.model = Model.create(self.Ni, self.No, self.model_settings)
         self.command_log = []
         self.error_log = []
         self.cerror_log = []
@@ -48,7 +59,7 @@ class SequenceRecognizer:
     def save(self, fname):
         import ocrolib
         data = {"Ni": self.Ni, "No": self.No, "codec": self.codec, "lnorm": self.lnorm, "load_file": fname,
-                "normalize": self.normalize}
+                "normalize": self.normalize, "model_settings": self.model_settings}
         ocrolib.save_object(fname, data)
         self.model.save(fname)
 
@@ -82,13 +93,18 @@ class SequenceRecognizer:
         "Predict an integer sequence of codes."
         assert(xs.shape[1]==self.Ni, "wrong image height (image: %d, expected: %d)" % (xs.shape[1], self.Ni))
         # only one batch
-        self.outputs, self.aligned = self.model.decode_sequence([xs])
-        self.aligned = self.aligned[0]
-        return self.output, self.aligned
+        outputs, seq_len, aligned = self.model.decode_sequence([xs])
+        aligned = aligned[0]
+        return outputs, aligned
 
     def predict_probabilities(self, xs):
         logits, seq_len = self.model.predict_sequence(xs)
         return logits, seq_len
+
+    def decode_sequences(self, xs):
+        logits, seq_len, codes = self.model.decode_sequence(xs)
+        return [self.l2s(c) for c in codes]
+
 
 
     def trainSequence(self,xs,cs,update=1,key=None):
@@ -154,5 +170,9 @@ class SequenceRecognizer:
 
     def predictString(self,xs):
         "Predict output as a string. This uses codec and normalizer."
-        cs = self.predictSequence(xs)
-        return self.l2s(cs)
+        return self.decode_sequences([xs])[0]
+
+    def resizeCodec(self, codec):
+        print("WARNING: Unsupported codec resizing!")
+        assert(self.No == codec.size() + 1)
+        return self.codec

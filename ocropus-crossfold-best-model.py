@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import subprocess
+import codecs
 
 # only one thread to train, do not use GPU
 os.environ['OMP_NUM_THREADS'] = "1"
@@ -31,6 +32,10 @@ parser.add_argument("--ntrain", type=int, default=30000,
 parser.add_argument("--tensorflow", action='store_true')
 parser.add_argument("--model_prefix", type=str, default="",
                     help="A optional prefix to label models")
+parser.add_argument("--load", type=str,
+                    help="Load a pretrained model")
+parser.add_argument("--load_pretrained", action="store_true",
+                    help="Load weights of pretrained model, the output layer will be reshaped and retrained")
 
 # testing setup
 parser.add_argument("--skip_test", action="store_true")
@@ -42,6 +47,8 @@ parser.add_argument("--econf", type=str, default="ocropus-econf")
 parser.add_argument("--skip_eval_best", action="store_true")
 parser.add_argument("--eval_data", type=str,
                     help="Path to the evaluation data")
+parser.add_argument("--eval", type=str, default="ocropus-eval.py",
+                    help="Evaluation program")
 
 
 # parse args and clean data
@@ -87,6 +94,10 @@ def run(command):
             break
 
         yield line
+
+
+def list_models(models_dir, file_ending="pyrnn.gz"):
+    return sorted([f for f in os.listdir(models_dir) if f.startswith(args.model_prefix) and f.endswith(file_ending)])
 
 
 if not os.path.isdir(args.root_dir):
@@ -163,11 +174,18 @@ def train_single_fold(fold_dir):
     models_dir = os.path.join(fold_dir, 'models')
     train_log = os.path.join(fold_dir, '%s_train.log' % args.model_prefix)
 
+    # clear models
+    for old_model in list_models(models_dir, file_ending=""):
+        os.remove(os.path.join(models_dir, old_model))
+
     with open(train_log, 'w') as train_log_file:
         for line in run(["python2", args.rtrain, tensorflow_arg, "--preload",
                                     # "--threads", 1, "--batch_size", 1, "-r", "1e-3",
                                     "--ntrain", str(args.ntrain),
-                                    "--codec", os.path.join(train_dir, "*", "*.gt.txt"),
+                                    "--codec", os.path.join(train_dir, "*", "*.gt.txt")] +
+                        (["--load", args.load] if args.load else []) +
+                        (["--load_pretrained"] if args.load_pretrained else []) +
+                        [
                                     "-o", os.path.join(models_dir, args.model_prefix),
                                     os.path.join(train_dir, "*", "*.png"),
                                     ]):
@@ -188,15 +206,13 @@ elif args.n_parallel <= 1:
 else:
     multi_pool = multiprocessing.Pool(args.n_parallel)
     r = multi_pool.map(train_single_fold, fold_dirs)
+    multi_pool.close()
 
 print("Training Finished")
 
 
 print("Running models on test set")
 
-
-def list_models(models_dir, file_ending="pyrnn.gz"):
-    return sorted([f for f in os.listdir(models_dir) if f.startswith(args.model_prefix) and f.endswith(file_ending)])
 
 
 # prerequisites, all splits have equal amount of models
@@ -251,7 +267,7 @@ def test_single_fold(fold_dir):
     test_log = os.path.join(fold_dir, '%s_test.log' % args.model_prefix)
     eval_csv = os.path.join(fold_dir, '%s_eval.csv' % args.model_prefix)
 
-    with open(test_log, 'w') as test_log_file, open(eval_csv, 'w') as eval_csv_file:
+    with codecs.open(test_log, 'w', "utf-8") as test_log_file, open(eval_csv, 'w') as eval_csv_file:
         all_models = list_models(models_dir)
         eval_csv_file.write("model," + ",".join(eval_lines_to_extract) + "\n")
 
@@ -304,6 +320,7 @@ elif args.n_parallel <= 1:
 else:
     multi_pool = multiprocessing.Pool(args.n_parallel)
     multi_pool.map(test_single_fold, fold_dirs)
+    multi_pool.close()
 
 print("Testing Finished")
 
@@ -339,13 +356,25 @@ def eval_single_model(model_path):
 if args.skip_eval_best:
     print("Skipping")
 else:
-    with open(os.path.join(args.root_dir, "%s_eval.csv" % args.model_prefix), 'w') as eval_file:
+    with codecs.open(os.path.join(args.root_dir, "%s_eval.csv" % args.model_prefix), 'w', 'utf-8') as eval_file:
         eval_file.write("model,err\n")
 
-        for best_model in best_models:
-            err = eval_single_model(os.path.join(best_models_dir, best_model))
-            eval_file.write("%s,%f\n" % (best_model, err))
-            print("%s, %f" % (best_model, err))
+        if args.eval:
+            process = subprocess.Popen(["python", args.eval,
+                             "--models"] + [os.path.join(best_models_dir, m) for m in best_models] +
+                            ["--ground_truth", os.path.join(args.eval_data, "*.gt.txt"),
+                             "--files", os.path.join(args.eval_data, "*.png"),
+                             "--batch_size", "50", "--threads", "8"],
+                                       stdout=subprocess.PIPE)
+            out, err = process.communicate()
+            output = out.decode("utf-8")
+            eval_file.write(output)
+            print(output)
+        else:
+            for best_model in best_models:
+                err = eval_single_model(os.path.join(best_models_dir, best_model))
+                eval_file.write("%s,%f\n" % (best_model, err))
+                print("%s, %f" % (best_model, err))
 
 
 print("Evaluation finished")

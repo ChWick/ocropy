@@ -64,6 +64,8 @@ parser.add_argument("--updates",action="store_true",
                     help="verbose LSTM updates")
 parser.add_argument('--load',default=None,
                     help="start training with a previously trained model")
+parser.add_argument('--load_pretrained', default=False, action="store_true",
+                    help="create new model but copy all weights - if possible - to the new model from the load argument")
 parser.add_argument('--start',default=-1,type=int,
                     help="manually set the number of already learned lines, which influences the naming and stoping condition, default: %(default)s which will then be overriden by the value saved in the network")
 parser.add_argument('-B', "--batch_size", type=int, default=1,
@@ -187,7 +189,7 @@ def save_lstm(fname,network):
 def load_lstm(fname, codec):
     if args.tensorflow:
         import ocrolib.tensorflow as tf_backend
-        network = tf_backend.SequenceRecognizer.load(fname)
+        network = tf_backend.SequenceRecognizer.load(fname, pretrained=args.load_pretrained, codec=codec)
     elif args.clstm:
         network = lstm.SeqRecognizer(args.height,args.hiddensize,
             codec=codec,

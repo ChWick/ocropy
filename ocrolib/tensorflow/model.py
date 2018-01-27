@@ -25,6 +25,7 @@ class Model:
                 100
             ],
             "use_peepholes": False,
+            "ctc_merge_repeated": False,
         }
 
     @staticmethod
@@ -33,7 +34,8 @@ class Model:
         graph = tf.Graph()
         with graph.as_default() as g:
             session = tf.Session(graph=graph,
-                                 config=tf.ConfigProto(intra_op_parallelism_threads=10))
+                                 # config=tf.ConfigPrototo(intra_op_parallelism_threads=10),
+                                )
             with tf.variable_scope("", reuse=False) as scope:
 
                 saver = tf.train.import_meta_graph(filename + '.meta')
@@ -83,7 +85,7 @@ class Model:
 
                 if len(model_settings["conv_pool"]) > 0:
                     cnn_inputs = tf.reshape(inputs, [batch_size, -1, num_features, 1])
-                    shape = 1, num_features
+                    shape = seq_len, num_features
 
                     conv_layers = []
                     pool_layers = [cnn_inputs]
@@ -103,12 +105,13 @@ class Model:
                             strides=model["pool_size"],
                         ))
 
-                    cnn_seq_len, cnn_features = (2, int(int(num_features / 2) / 2))
-                    lstm_seq_len = tf.to_int32((tf.to_int32(seq_len / 2) / 2))
-                    #rnn_inputs = tf.reshape(pool1, [batch_size, tf.shape(output)[1], model_settings["conv_pool"][-1]["filters"] * cnn_features])
+                        shape = (tf.to_int32(shape[0] / model["pool_size"][0]),
+                                 shape[1] / model["pool_size"][1])
+
+                    lstm_seq_len, lstm_num_features = shape
                     rnn_inputs = tf.reshape(pool_layers[-1],
                                             [batch_size, tf.shape(pool_layers[-1])[1],
-                                             model_settings["conv_pool"][-1]["filters"] * 12])
+                                             model_settings["conv_pool"][-1]["filters"] * lstm_num_features])
 
                 else:
                     rnn_inputs = inputs
@@ -156,9 +159,9 @@ class Model:
                 time_major_logits = tf.transpose(logits, (1, 0, 2), name='time_major_logits')
 
                 # ctc predictions
-                loss = ctc_ops.ctc_loss(targets, time_major_logits, lstm_seq_len, time_major=True, ctc_merge_repeated=True)
-                decoded, log_prob = ctc_ops.ctc_greedy_decoder(time_major_logits, lstm_seq_len, merge_repeated=True)
-                #decoded, log_prob = ctc_ops.ctc_beam_search_decoder(time_major_logits, lstm_seq_len, merge_repeated=False)
+                loss = ctc_ops.ctc_loss(targets, time_major_logits, lstm_seq_len, time_major=True, ctc_merge_repeated=model_settings["ctc_merge_repeated"])
+                decoded, log_prob = ctc_ops.ctc_greedy_decoder(time_major_logits, lstm_seq_len, merge_repeated=model_settings["ctc_merge_repeated"])
+                #decoded, log_prob = ctc_ops.ctc_beam_search_decoder(time_major_logits, lstm_seq_len, merge_repeated=model_settings["merge_repeated"])
                 decoded = decoded[0]
                 sparse_decoded = (
                     tf.identity(decoded.indices, name="decoded_indices"),
@@ -202,6 +205,16 @@ class Model:
         self.logits = logits
         self.l_rate = l_rate
         self.default_learning_rate = -1
+
+    def load_weights(self, model_file):
+        with self.graph.as_default() as g:
+            all_var_names = [v for v in tf.global_variables() if not v.name.startswith("W") and not v.name.startswith("B")]
+            print(all_var_names)
+            saver = tf.train.Saver(all_var_names)
+
+            # Restore variables from disk.
+            saver.restore(self.session, model_file)
+            print("Model restored")
 
     def save(self, output_file):
         with self.graph.as_default() as g:
@@ -294,8 +307,8 @@ class Model:
 
     def decode_sequence(self, x):
         x, len_x = self.sparse_data_to_dense(x)
-        logits, decoded, = self.session.run([self.logits, self.decoded], feed_dict={self.inputs: x, self.seq_len: len_x})
+        logits, seq_len, decoded, = self.session.run([self.logits, self.seq_len_out, self.decoded], feed_dict={self.inputs: x, self.seq_len: len_x})
         logits = np.roll(logits, 1, axis=2)
         decoded = Model.sparse_to_lists(decoded, shift_values=1)
-        return logits, decoded
+        return logits, seq_len, decoded
 

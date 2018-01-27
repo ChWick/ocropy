@@ -1,4 +1,6 @@
 import numpy as np
+import ocrolib
+import multiprocessing
 
 def sumouter(u,v,out=None):
     if out is None:
@@ -12,3 +14,5 @@ def sumprod(u,v,out=None):
         n = u.shape[1]
         out = np.zeros(n)
     return np.einsum('ki,ki->i',u,v,out=out)
+
+

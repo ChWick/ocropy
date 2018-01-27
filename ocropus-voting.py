@@ -5,6 +5,7 @@ import numpy as np
 import ocrolib
 import os
 import matplotlib.pyplot as plt
+from ocrolib.prediction_utils import process_model, greedy_decode
 
 parser = argparse.ArgumentParser()
 parser.add_argument("-m", "--models", nargs="+", type=str, required=True,
@@ -30,6 +31,9 @@ parser.add_argument("-k", "--kind", default="exact",
 parser.add_argument("--batch_size", default=100, type=int,
                     help="Batch size of the prediction")
 
+parser.add_argument("--threads", default=8, type=int,
+                    help="The number of threads to use")
+
 args = parser.parse_args()
 
 models = sorted(ocrolib.glob_all(args.models))
@@ -48,78 +52,21 @@ else:
 
 ground_truth_txts = sorted(ocrolib.glob_all(args.ground_truth))
 
-def load_network(model_path):
-    try:
-        import ocrolib.tensorflow as tf_backend
-        network = tf_backend.SequenceRecognizer.load(model_path)
-    except Exception as e:
-        print("Ocropus model could not be loaded, trying as normal model: %s" % e)
-        network = ocrolib.load_object(model_path, verbose=1)
-        for x in network.walk(): x.postLoad()
-        for x in network.walk():
-            if isinstance(x, ocrolib.lstm.LSTM):
-                x.allocate(5000)
+models = [
+    {"path": m,
+     "batch_size": args.batch_size,
+     "height": args.height,
+     "nolineest": args.nolineest,
+     "threads": args.threads,
+     "pad": args.pad,
+     "predict": "probabilities",
+     }
+    for m in models
+]
 
-    lnorm = getattr(network, "lnorm", None)
-
-    if args.height>0:
-        lnorm.setHeight(args.height)
-
-    return {"net": network, "lnorm": lnorm}
-
-
-def load_line(fname):
-    base, _ = ocrolib.allsplitext(fname)
-    line = ocrolib.read_image_gray(fname)
-
-    if np.prod(line.shape) == 0:
-        return None
-
-    if np.amax(line) == np.amin(line):
-        return None
-
-    return line
-
-
-def prepare_one_for_model(arg):
-    fname, lnorm = arg
-
-    line = load_line(fname)
-
-    if not args.nolineest:
-        temp = np.amax(line) - line
-        temp = temp * 1.0 / np.amax(temp)
-        lnorm.measure(temp)
-        line = lnorm.normalize(line, cval=np.amax(line))
-
-    line = ocrolib.lstm.prepare_line(line, args.pad)
-
-    return line
-
-
-def process_model(model):
-    print("Starting model %s" % model)
-    model = load_network(model)
-    network = model["net"]
-    lnorm = model["lnorm"]
-    load_pool = multiprocessing.Pool(processes=50)
-    print("Loading data")
-    lines = load_pool.map(prepare_one_for_model, [(fname, lnorm) for fname in inputs])
-    print("Predicting data")
-    # only one line, atm
-
-    predictions = []
-    for i in range(0, len(lines), args.batch_size):
-        predictions += [d[:l] for d, l in zip(*network.predict_probabilities(lines[i:i + args.batch_size]))]
-
-    print("Prediction done")
-
-    return predictions, model["net"].codec
-
-
-pool = multiprocessing.pool.ThreadPool(processes=len(models))
-output = pool.map(process_model, models)
-#output = list(map(process_model, models))
+pool = multiprocessing.pool.ThreadPool(processes=min(len(models), args.threads))
+output = pool.map(process_model, [(model, inputs) for model in models])
+#output = list(map(process_model, [(m, inputs) for m in models]))
 print("Finished predictions")
 
 
@@ -141,17 +88,6 @@ for i, fname in enumerate(inputs):
     predictions.append((fname, [(p[i], codec) for p, codec in output]))
 
 
-def greedy_decode(pred, code_to_chars, blank=0):
-    indices = np.argmax(pred, axis=1)
-    decoded = []
-    last_i = 0
-    for i in indices:
-        if i != blank and i != last_i:
-            decoded.append(i)
-        last_i = i
-
-    return u"".join([code_to_chars[i] for i in decoded])
-
 
 def process_single_line(fname_preds):
     fname, preds = fname_preds
@@ -168,18 +104,26 @@ def process_single_line(fname_preds):
         for all_code, char in enumerate(all_chars):
             if char in codec.char2code:
                 model_code = codec.char2code[char]
+                # if model_code == 0:
                 logits[:, all_code] += pred[:, model_code]
+                # else:
+                #     sp = pred[:, model_code]
+                #     op = sp[:]
+                #     for i in range(len(sp)):
+                #         op[i] = max(sp[max(0, i - 1):min(i+1,len(sp))])
+                #
+                #     logits[:, all_code] = op
             else:
                 misses += 1
 
         single_predictions.append(greedy_decode(pred, codec.code2char))
 
-    #logits /= 5
+    logits /= len(models)
 
-    #do_pred = logits[:, 0] < 0.7
+    # do_pred = logits[:, 0] < 0.9
 
-    #logits = logits[do_pred]
-    #logits[:, 0] = 0
+    # logits = logits[do_pred]
+    # logits[:, 0] = 0
 
 
     #plt.imshow(logits)
@@ -203,8 +147,14 @@ if args.output:
         if not os.path.exists(mdir):
             os.mkdir(mdir)
 
-    for input, ts in zip(inputs, single_txts):
-        print(input, ts)
+    for fname, ts in zip(inputs, single_txts):
+        fname = os.path.basename(fname)
+        base,_ = ocrolib.allsplitext(fname)
+        for i, txt in enumerate(ts):
+            mdir = os.path.join(args.output, str(i))
+            ocrolib.write_text(os.path.join(mdir, base+".txt"), txt)
+
+    print("Outputs written to %s" % args.output)
 
 
 
