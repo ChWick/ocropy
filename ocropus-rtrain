@@ -18,6 +18,7 @@ from ocrolib import lineest
 import traceback
 import time
 from multiprocessing import Pool
+import ocrolib.tensorflow.model as tensorflow_model
 
 np.seterr(divide='raise',over='raise',invalid='raise',under='ignore')
 
@@ -48,6 +49,8 @@ parser.add_argument("-S","--hiddensize",type=int,default=100,
                     help="# LSTM state units, default: %(default)s")
 parser.add_argument("-o","--output",default=None,
                     help="LSTM model file")
+parser.add_argument("--output_model_prefix", type=str, default=None,
+                    help="Prefix for stored models. This is by default created by the network shape")
 parser.add_argument("-F","--savefreq",type=int,default=1000,
                     help="LSTM save frequency, default: %(default)s")
 parser.add_argument("--freq_in_s", action="store_true", default=False,
@@ -74,6 +77,8 @@ parser.add_argument('--threads', type=int, default=4,
                     help="The number of threads being used for batch generation")
 parser.add_argument('--preload', action="store_true", default=False,
                     help="Load all all files into memory before running the learning algorithm.")
+parser.add_argument('--network', type=str, default="lstm=100",
+                    help="Network structure that shall be used for training. Eg. 'cnn=60:3x3,pool=2x2,lstm=100")
 
 # debugging
 parser.add_argument("-X","--exec",default="None",dest="execute",
@@ -96,10 +101,6 @@ if len(inputs)==0:
     sys.exit(0)
 
 print("# inputs", len(inputs))
-
-# pre-execute any python commands
-
-exec args.execute
 
 # make sure movie mode is used correctly
 
@@ -225,6 +226,7 @@ else:
     if args.tensorflow:
         import ocrolib.tensorflow as tf_backend
         network = tf_backend.SequenceRecognizer(args.height, args.hiddensize,
+                                                model_settings=tensorflow_model.Model.parse_model_settings(args.network),
                                                 codec=codec, normalize=lstm.normalize_nfkc)
     else:
         network = lstm.SeqRecognizer(args.height,args.hiddensize,
@@ -334,7 +336,7 @@ if args.preload:
 
     for fname, line, cs, transcript in data:
         if line is not None:
-            loaded_data[fname] = (line, cs, transcript)
+            loaded_data[fname] = (fname, line, cs, transcript)
         else:
             inputs.remove(fname)
 
@@ -379,7 +381,7 @@ for trial in range(start,args.ntrain):
         print("ERROR", e)
         continue
 
-    all_lines, all_cs, all_transcriptions = zip(*data)
+    all_fnames, all_lines, all_cs, all_transcriptions = zip(*data)
 
 
     train_start = time.time()
@@ -389,7 +391,7 @@ for trial in range(start,args.ntrain):
         else:
             pcs = network.trainSequence(all_lines[0], all_cs[0],update=do_update,key=fname[0])
 
-        line, cs, transcript = data[0]
+        _, line, cs, transcript = data[0]
     except FloatingPointError as e:
         print("# oops, got FloatingPointError", e)
         traceback.print_exc()

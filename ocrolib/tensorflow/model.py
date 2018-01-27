@@ -3,6 +3,7 @@ from tensorflow.python.ops import rnn
 from tensorflow.contrib.rnn import LSTMCell, MultiRNNCell, DropoutWrapper
 from tensorflow.python.ops import ctc_ops
 import numpy as np
+import re
 
 
 class Model:
@@ -27,6 +28,93 @@ class Model:
             "use_peepholes": False,
             "ctc_merge_repeated": False,
         }
+
+    @staticmethod
+    def write_model_settings(model_settings):
+        out_parts = []
+        for layer in model_settings:
+            if layer["type"] == "cnn":
+                out_parts.append("cnn=%d:%dx%d" % (layer["filters"], layer["kernel_size"][0], layer["kernel_size"][1]))
+            elif layer["type"] == "pool":
+                out_parts.append("pool=%dx%d" % (layer["kernel_size"][0], layer["kernel_size"][1]))
+            elif layer["type"] == "lstm":
+                out_parts.append("lstm=%d" % (layer["hidden"], ))
+            else:
+                raise Exception("Unknown layer type '%s'" % layer["type"])
+
+        for flag in [model_settings["use_peepholes"], model_settings["ctc_merge_repeated"]]:
+            out_parts.append("%s=%d" % (flag, ("false", "true")[model_settings[flag]]))
+
+        return out_parts.join()
+
+
+
+    @staticmethod
+    def parse_model_settings(str):
+        cnn_matcher = re.compile("([\d]+)(:([\d]+)(x([\d]+))?)?")
+        pool_matcher = re.compile("([\d]+)(x([\d]+))?")
+        params = str.split(",")
+        model = []
+        lstm_appeared = False
+        params_dict = {
+            "ctc_merge_repeated": True,
+            "use_peepholes": False,
+            "layers": model,
+        }
+        for param in params:
+            label, value = tuple(param.split("="))
+            if label == "ctc_merge_repeated":
+                params_dict["ctc_merge_repeated"] = value.lower == "true"
+            elif label == "use_peepholes":
+                params_dict["use_peepholes"] = value.lower == "true"
+            elif label == "lstm":
+                lstm = {
+                    "type": "lstm",
+                    "hidden": int(value),
+                }
+                model.append(lstm)
+            elif label == "cnn":
+                if lstm_appeared:
+                    raise Exception("LSTM layers must be placed proceeding to CNN/Pool")
+
+                match = cnn_matcher.match(value)
+                if match is None:
+                    raise Exception("CNN structure needs: cnn=[filters]:[h]x[w]")
+
+                match = match.groups()
+                kernel_size = [2, 2]
+                if match[1] is not None:
+                    kernel_size = [int(match[2])] * 2
+                if match[3] is not None:
+                    kernel_size = [int(match[2]), int(match[4])]
+
+                cnn = {
+                    "type": "cnn",
+                    "filters": int(match[0]),
+                    "kernel_size": kernel_size,
+                }
+                model.append(cnn)
+            elif label == "pool":
+                if lstm_appeared:
+                    raise Exception("LSTM layers must be placed proceeding to CNN/Pool")
+                match = pool_matcher.match(value)
+                if match is None:
+                    raise Exception("Pool structure needs: pool=[h];[w]")
+
+                match = match.groups()
+                kernel_size = [int(match[0])] * 2
+                if match[1] is not None:
+                    kernel_size = [int(match[0]), int(match[2])]
+
+                pool = {
+                    "type": "pool",
+                    "kernel_size": kernel_size
+                }
+                model.append(pool)
+
+        return params_dict
+
+
 
     @staticmethod
     def load(filename):
@@ -82,42 +170,49 @@ class Model:
             l_rate = tf.placeholder(tf.float32, shape=(), name="l_rate")
 
             with tf.variable_scope("", reuse=reuse_variables) as scope:
+                has_conv_or_pool = model_settings["layers"][0]["type"] != "lstm"
 
-                if len(model_settings["conv_pool"]) > 0:
+                if has_conv_or_pool:
                     cnn_inputs = tf.reshape(inputs, [batch_size, -1, num_features, 1])
                     shape = seq_len, num_features
 
-                    conv_layers = []
-                    pool_layers = [cnn_inputs]
+                    layers = [cnn_inputs]
+                    last_num_filters = 1
 
-                    for model in model_settings["conv_pool"]:
-                        conv_layers.append(tf.layers.conv2d(
-                            inputs=pool_layers[-1],
-                            filters=model["filters"],
-                            kernel_size=model["kernel_size"],
-                            padding="same",
-                            activation=tf.nn.relu,
-                        ))
+                    for model in [l for l in model_settings["layers"] if l["type"] != "lstm"]:
+                        if model["type"] == "cnn":
+                            layers.append(tf.layers.conv2d(
+                                inputs=layers[-1],
+                                filters=model["filters"],
+                                kernel_size=model["kernel_size"],
+                                padding="same",
+                                activation=tf.nn.relu,
+                            ))
+                            last_num_filters = model["filters"]
+                        elif model["type"] == "pool":
+                            layers.append(tf.layers.max_pooling2d(
+                                inputs=layers[-1],
+                                pool_size=model["kernel_size"],
+                                strides=model["kernel_size"],
+                            ))
 
-                        pool_layers.append(tf.layers.max_pooling2d(
-                            inputs=conv_layers[-1],
-                            pool_size=model["pool_size"],
-                            strides=model["pool_size"],
-                        ))
-
-                        shape = (tf.to_int32(shape[0] / model["pool_size"][0]),
-                                 shape[1] / model["pool_size"][1])
+                            shape = (tf.to_int32(shape[0] / model["kernel_size"][0]),
+                                     shape[1] / model["kernel_size"][1])
+                        else:
+                            raise Exception("Unknown layer of type %s" % model["type"])
 
                     lstm_seq_len, lstm_num_features = shape
-                    rnn_inputs = tf.reshape(pool_layers[-1],
-                                            [batch_size, tf.shape(pool_layers[-1])[1],
-                                             model_settings["conv_pool"][-1]["filters"] * lstm_num_features])
+                    rnn_inputs = tf.reshape(layers[-1],
+                                            [batch_size, tf.shape(layers[-1])[1],
+                                             last_num_filters * lstm_num_features])
 
                 else:
                     rnn_inputs = inputs
                     lstm_seq_len = seq_len
 
-                if len(model_settings["lstm"]) > 0:
+                lstm_layers = [l for l in model_settings["layers"] if l['type'] == "lstm"]
+
+                if len(lstm_layers) > 0:
                     def get_lstm_cell(num_hidden, use_peepholse=model_settings["use_peepholes"]):
                         return LSTMCell(num_hidden,
                                         use_peepholes=use_peepholse,
@@ -128,16 +223,16 @@ class Model:
                                         #activation=tf.sigmoid,
                                         )
 
-                    for i, lstm_hidden in enumerate(model_settings['lstm']):
-                        fw, bw = get_lstm_cell(lstm_hidden), get_lstm_cell(lstm_hidden)
+                    for i, lstm in enumerate(lstm_layers):
+                        fw, bw = get_lstm_cell(lstm["hidden"]), get_lstm_cell(lstm["hidden"])
                         (output_fw, output_bw), _ \
                             = rnn.bidirectional_dynamic_rnn(fw, bw, rnn_inputs, lstm_seq_len,
                                                             dtype=tf.float32, scope=scope.name + "BiRNN%d" % i)
                         rnn_inputs = tf.concat((output_fw, output_bw), 2)
 
-                    output_size = model_settings['lstm'][-1] * 2
+                    output_size = lstm_layers[-1]["hidden"] * 2
                 else:
-                    output_size = model_settings["conv_pool"][-1]["filters"] * 12
+                    raise Exception("Currently unsupported: no lstm layer")
 
                 outputs = rnn_inputs
 

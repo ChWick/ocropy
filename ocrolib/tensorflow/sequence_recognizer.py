@@ -35,8 +35,6 @@ class SequenceRecognizer:
             self.lnorm = lineest.CenterNormalizer()
 
         self.model_settings = model_settings
-        if self.model_settings is None:
-            self.model_settings = Model.default_model_settings()
 
         if load_file is not None:
             if pretrained:
