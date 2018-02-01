@@ -32,27 +32,27 @@ class Model:
     @staticmethod
     def write_model_settings(model_settings):
         out_parts = []
-        for layer in model_settings:
+        for layer in model_settings["layers"]:
             if layer["type"] == "cnn":
-                out_parts.append("cnn=%d:%dx%d" % (layer["filters"], layer["kernel_size"][0], layer["kernel_size"][1]))
+                out_parts.append("cnn_%d_%dx%d" % (layer["filters"], layer["kernel_size"][0], layer["kernel_size"][1]))
             elif layer["type"] == "pool":
-                out_parts.append("pool=%dx%d" % (layer["kernel_size"][0], layer["kernel_size"][1]))
+                out_parts.append("pool_%dx%d" % (layer["kernel_size"][0], layer["kernel_size"][1]))
             elif layer["type"] == "lstm":
-                out_parts.append("lstm=%d" % (layer["hidden"], ))
+                out_parts.append("lstm_%d" % (layer["hidden"], ))
             else:
                 raise Exception("Unknown layer type '%s'" % layer["type"])
 
-        for flag in [model_settings["use_peepholes"], model_settings["ctc_merge_repeated"]]:
-            out_parts.append("%s=%d" % (flag, ("false", "true")[model_settings[flag]]))
+        for flag in ["use_peepholes", "ctc_merge_repeated"]:
+            out_parts.append("%s_%s" % (flag, ("false", "true")[model_settings[flag]]))
 
-        return out_parts.join()
+        return "__".join(out_parts)
 
 
 
     @staticmethod
     def parse_model_settings(str):
-        cnn_matcher = re.compile("([\d]+)(:([\d]+)(x([\d]+))?)?")
-        pool_matcher = re.compile("([\d]+)(x([\d]+))?")
+        cnn_matcher = re.compile("^([\d]+)(:([\d]+)(x([\d]+))?)?$")
+        pool_matcher = re.compile("^([\d]+)(x([\d]+))?$")
         params = str.split(",")
         model = []
         lstm_appeared = False
@@ -156,6 +156,7 @@ class Model:
 
     @staticmethod
     def create(num_features, num_classes, model_settings, reuse_variables=False):
+        print("Creating tf graph with settings: %s" % model_settings)
         graph = tf.Graph()
         with graph.as_default():
             session = tf.Session(graph=graph,
@@ -254,7 +255,12 @@ class Model:
                 time_major_logits = tf.transpose(logits, (1, 0, 2), name='time_major_logits')
 
                 # ctc predictions
-                loss = ctc_ops.ctc_loss(targets, time_major_logits, lstm_seq_len, time_major=True, ctc_merge_repeated=model_settings["ctc_merge_repeated"])
+                loss = ctc_ops.ctc_loss(targets,
+                                        time_major_logits,
+                                        lstm_seq_len,
+                                        time_major=True,
+                                        ctc_merge_repeated=model_settings["ctc_merge_repeated"],
+                                        ignore_longer_outputs_than_inputs=True)
                 decoded, log_prob = ctc_ops.ctc_greedy_decoder(time_major_logits, lstm_seq_len, merge_repeated=model_settings["ctc_merge_repeated"])
                 #decoded, log_prob = ctc_ops.ctc_beam_search_decoder(time_major_logits, lstm_seq_len, merge_repeated=model_settings["merge_repeated"])
                 decoded = decoded[0]

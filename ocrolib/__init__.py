@@ -10,6 +10,6 @@ __all__ = [
 ### top level imports
 ################################################################
 
-import default
-from common import *
-from default import traceback as trace
+import ocrolib.default
+from ocrolib.common import *
+from ocrolib.default import traceback as trace

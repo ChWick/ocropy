@@ -5,6 +5,7 @@ import re
 import shutil
 import subprocess
 import codecs
+#import ocrolib.tensorflow.model as tf_model
 
 # only one thread to train, do not use GPU
 os.environ['OMP_NUM_THREADS'] = "1"
@@ -30,12 +31,12 @@ parser.add_argument("--rtrain", type=str, default="ocropus-rtrain")
 parser.add_argument("--ntrain", type=int, default=30000,
                     help="# lines to train before stopping, default: %(default)s")
 parser.add_argument("--tensorflow", action='store_true')
-parser.add_argument("--model_prefix", type=str, default="",
-                    help="A optional prefix to label models")
 parser.add_argument("--load", type=str,
                     help="Load a pretrained model")
 parser.add_argument("--load_pretrained", action="store_true",
                     help="Load weights of pretrained model, the output layer will be reshaped and retrained")
+parser.add_argument('--network', type=str, required=True,
+                    help="Network structure that shall be used for training. Eg. 'cnn=60:3x3,pool=2x2,lstm=100")
 
 # testing setup
 parser.add_argument("--skip_test", action="store_true")
@@ -59,7 +60,14 @@ args.rtrain = os.path.abspath(os.path.expanduser(args.rtrain))
 args.rpred = os.path.abspath(os.path.expanduser(args.rpred))
 args.econf = os.path.abspath(os.path.expanduser(args.econf))
 data_dir = os.path.join(args.root_dir, 'data')
-best_models_dir = os.path.join(args.root_dir, '%s_best_models' % args.model_prefix)
+#model_settings = tf_model.Model.parse_model_settings(args.network)
+#model_prefix = tf_model.Model.write_model_settings(model_settings)
+model_prefix = args.network
+if args.load:
+    model_prefix = "pretrained=%s_%s" % (os.path.splitext(os.path.basename(args.load))[0], args.network)
+
+best_models_dir = os.path.join(args.root_dir, '%s_best_models' % model_prefix)
+fold_dir_ = "%s_folds" % model_prefix
 
 tensorflow_arg = "--tensorflow" if args.tensorflow else ""
 
@@ -86,8 +94,9 @@ def symlink(source, name, is_dir=True):
         os.symlink(source, name, target_is_directory=is_dir)
 
 
-def run(command):
+def run(command, process_out_list=[]):
     process = subprocess.Popen(command, stdout=subprocess.PIPE, shell=False)
+    process_out_list.append(process)
     while True:
         line = process.stdout.readline().rstrip().decode("utf-8")
         if not line:
@@ -97,7 +106,7 @@ def run(command):
 
 
 def list_models(models_dir, file_ending="pyrnn.gz"):
-    return sorted([f for f in os.listdir(models_dir) if f.startswith(args.model_prefix) and f.endswith(file_ending)])
+    return sorted([f for f in os.listdir(models_dir) if f.startswith(model_prefix) and f.endswith(file_ending)])
 
 
 if not os.path.isdir(args.root_dir):
@@ -114,7 +123,7 @@ data_fold_dirs_ = [d for d in sorted(os.listdir(data_dir))
 print("Found %d folds" % len(data_fold_dirs_))
 print("Setting up training and test fold dirs")
 
-fold_root_dir = os.path.join(args.root_dir, 'folds')
+fold_root_dir = os.path.join(args.root_dir, fold_dir_)
 mkdir(fold_root_dir)
 
 
@@ -172,27 +181,36 @@ def train_single_fold(fold_dir):
 
     train_dir = os.path.join(fold_dir, 'train')
     models_dir = os.path.join(fold_dir, 'models')
-    train_log = os.path.join(fold_dir, '%s_train.log' % args.model_prefix)
+    train_log = os.path.join(fold_dir, '%s_train.log' % model_prefix)
 
     # clear models
     for old_model in list_models(models_dir, file_ending=""):
         os.remove(os.path.join(models_dir, old_model))
 
     with open(train_log, 'w') as train_log_file:
+        process = []
         for line in run(["python2", args.rtrain, tensorflow_arg, "--preload",
+                        "--network", args.network,
                                     # "--threads", 1, "--batch_size", 1, "-r", "1e-3",
                                     "--ntrain", str(args.ntrain),
                                     "--codec", os.path.join(train_dir, "*", "*.gt.txt")] +
                         (["--load", args.load] if args.load else []) +
                         (["--load_pretrained"] if args.load_pretrained else []) +
                         [
-                                    "-o", os.path.join(models_dir, args.model_prefix),
+                                    "-o", os.path.join(models_dir, model_prefix),
                                     os.path.join(train_dir, "*", "*.png"),
-                                    ]):
+                                    ], process):
             if args.verbose:
                 print("Fold %s: %s" % (fold_dir, line.strip()))
             train_log_file.write(line + "\n")
             train_log_file.flush()
+
+        process = process[0]
+        process.communicate()
+        if process.returncode != 0:
+            print("Error in training step. exitting.")
+            raise Exception("Error in training step")
+
 
     print("Finished training for fold '%s'" % fold_dir)
 
@@ -205,7 +223,7 @@ elif args.n_parallel <= 1:
     list(map(train_single_fold, fold_dirs))
 else:
     multi_pool = multiprocessing.Pool(args.n_parallel)
-    r = multi_pool.map(train_single_fold, fold_dirs)
+    multi_pool.map(train_single_fold, fold_dirs)
     multi_pool.close()
 
 print("Training Finished")
@@ -264,8 +282,8 @@ def test_single_fold(fold_dir):
 
     test_dir = os.path.join(fold_dir, 'test')
     models_dir = os.path.join(fold_dir, 'models')
-    test_log = os.path.join(fold_dir, '%s_test.log' % args.model_prefix)
-    eval_csv = os.path.join(fold_dir, '%s_eval.csv' % args.model_prefix)
+    test_log = os.path.join(fold_dir, '%s_test.log' % model_prefix)
+    eval_csv = os.path.join(fold_dir, '%s_eval.csv' % model_prefix)
 
     with codecs.open(test_log, 'w', "utf-8") as test_log_file, open(eval_csv, 'w') as eval_csv_file:
         all_models = list_models(models_dir)
@@ -307,7 +325,7 @@ def test_single_fold(fold_dir):
             print(output.split("\n")[-1])
 
         print("Fold %s: Best model is %s with error of %s %%" % (fold_dir, current_best_model, current_best_error))
-        copy_model(current_best_model, models_dir, "%s_%s.pyrnn.gz" % (args.model_prefix, fold), best_models_dir)
+        copy_model(current_best_model, models_dir, "%s_%s.pyrnn.gz" % (model_prefix, fold), best_models_dir)
         print("Copied best model to %s" % best_models_dir)
 
     print("Finished testing for fold '%s'" % fold_dir)
@@ -356,7 +374,7 @@ def eval_single_model(model_path):
 if args.skip_eval_best:
     print("Skipping")
 else:
-    with codecs.open(os.path.join(args.root_dir, "%s_eval.csv" % args.model_prefix), 'w', 'utf-8') as eval_file:
+    with codecs.open(os.path.join(args.root_dir, "%s_eval.csv" % model_prefix), 'w', 'utf-8') as eval_file:
         eval_file.write("model,err\n")
 
         if args.eval:

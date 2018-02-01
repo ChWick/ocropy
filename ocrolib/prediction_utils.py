@@ -1,6 +1,7 @@
 import multiprocessing
 import ocrolib
 import numpy as np
+from click import progressbar
 
 def load_network(model):
     import ocrolib.tensorflow as tf_backend
@@ -61,11 +62,17 @@ def process_model(args):
 
     predictions = []
     if model["predict"] == "probabilities":
-        for i in range(0, len(lines), model["batch_size"]):
-            predictions += [d[:l] for d, l in zip(*network.predict_probabilities(lines[i:i + model["batch_size"]]))]
+        with progressbar(range(0, len(lines), model["batch_size"])) as start_indices:
+            for i in start_indices:
+                predictions += [d[:l] for d, l in zip(*network.predict_probabilities(lines[i:i + model["batch_size"]]))]
     elif model["predict"] == "decode":
-        for i in range(0, len(lines), model["batch_size"]):
-            predictions += network.decode_sequences(lines[i:i + model["batch_size"]])
+        with progressbar(range(0, len(lines), model["batch_size"])) as start_indices:
+            for i in start_indices:
+                predictions += network.decode_sequences(lines[i:i + model["batch_size"]])
+    elif model["predict"] == "decode_probabilities":
+        with progressbar(range(0, len(lines), model["batch_size"])) as start_indices:
+            for i in start_indices:
+                predictions += network.decode_sequences(lines[i:i + model["batch_size"]], decoded_only=False)
     else:
         raise Exception("Unknown prediction requested: '%s'" % model["predict"])
 

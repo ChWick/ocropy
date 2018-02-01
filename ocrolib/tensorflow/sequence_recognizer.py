@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 
 class SequenceRecognizer:
     @staticmethod
-    def load(fname, pretrained=False, codec=None):
+    def load(fname, model_settings=None, pretrained=False, codec=None):
         import ocrolib
         data = ocrolib.load_object(fname)
         data["load_file"] = fname
@@ -17,7 +17,9 @@ class SequenceRecognizer:
             # overwrite codec with new codec
             data["codec"] = codec
         data["pretrained"] = pretrained
-        print(data)
+        if model_settings:
+            # only override if desired
+            data["model_settings"] = model_settings
         return SequenceRecognizer(**data)
 
     """Perform sequence recognition using BIDILSTM and alignment."""
@@ -99,11 +101,13 @@ class SequenceRecognizer:
         logits, seq_len = self.model.predict_sequence(xs)
         return logits, seq_len
 
-    def decode_sequences(self, xs):
+    def decode_sequences(self, xs, decoded_only=True):
         logits, seq_len, codes = self.model.decode_sequence(xs)
-        return [self.l2s(c) for c in codes]
-
-
+        sequences = [self.l2s(c) for c in codes]
+        if decoded_only:
+            return sequences
+        else:
+            return [(s, l[:s_l]) for s, l, s_l in zip(sequences, logits, seq_len)]
 
     def trainSequence(self,xs,cs,update=1,key=None):
         "Train with an integer sequence of codes."

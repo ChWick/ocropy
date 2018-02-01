@@ -190,7 +190,9 @@ def save_lstm(fname,network):
 def load_lstm(fname, codec):
     if args.tensorflow:
         import ocrolib.tensorflow as tf_backend
-        network = tf_backend.SequenceRecognizer.load(fname, pretrained=args.load_pretrained, codec=codec)
+        network = tf_backend.SequenceRecognizer.load(fname,
+                                                     model_settings=tensorflow_model.Model.parse_model_settings(args.network),
+                                                     pretrained=args.load_pretrained, codec=codec)
     elif args.clstm:
         network = lstm.SeqRecognizer(args.height,args.hiddensize,
             codec=codec,

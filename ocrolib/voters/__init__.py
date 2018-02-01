@@ -1,0 +1,1 @@
+from sequence_voter import process_text, process_files
