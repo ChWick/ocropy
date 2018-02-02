@@ -122,8 +122,8 @@ class Model:
         graph = tf.Graph()
         with graph.as_default() as g:
             session = tf.Session(graph=graph,
-                                 config=tf.ConfigPrototo(intra_op_parallelism_threads=threads,
-                                                         inter_op_parallelism_threads=threads),
+                                 config=tf.ConfigProto(intra_op_parallelism_threads=threads,
+                                                       inter_op_parallelism_threads=threads),
                                 )
             with tf.variable_scope("", reuse=False) as scope:
 

@@ -90,7 +90,8 @@ if not args.skip_eval_best:
 
 def run_cmd(threads):
     if args.run:
-        return args.run.split(args.run.format({"threads": threads}))
+        formatted = args.run.format(threads=threads)
+        return formatted.split()
     else:
         return []
 
@@ -375,8 +376,8 @@ else:
 
         def evaluate_single_model(model):
             process = subprocess.Popen(run_cmd(8) +
-                                       ["python", args.eval,
-                                        "--models"] + [os.path.join(best_models_dir, model)] +
+                                        ["python", args.eval,
+                                        "--models", os.path.join(best_models_dir, model)] +
                                        ["--ground_truth", os.path.join(args.eval_data, "*.gt.txt"),
                                         "--files", os.path.join(args.eval_data, "*.png"),
                                         "--batch_size", "50", "--threads", "8"],
