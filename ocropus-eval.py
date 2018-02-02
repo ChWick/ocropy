@@ -10,6 +10,8 @@ from collections import Counter
 import pickle
 
 parser = argparse.ArgumentParser()
+
+# evaluation setup
 parser.add_argument("-m", "--models", nargs="+", type=str, required=True,
                     help="The models to evaluate")
 parser.add_argument("-g", "--ground_truth", nargs="+", type=str, required=False,

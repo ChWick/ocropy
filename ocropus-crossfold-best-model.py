@@ -13,9 +13,15 @@ os.environ['CUDA_VISIBLE_DEVICES'] = ""
 
 parser = argparse.ArgumentParser()
 
+# global setup
+parser.add_argument("--run", type=str, default="",
+                    help="All scripts commands will be passed to this command. {threads} will be replaced with the "
+                         "number of threads that are required for a single specific task. "
+                         "E. g. use 'srun --cpus-per-task {threads}' for slurm usage")
+
 # folds setup
 parser.add_argument("--root_dir", type=str, default="",
-                    help="Expectes a 'data' dir as sub dir. The data dir must contain a dir for each fold "
+                    help="Expects a 'data' dir as sub dir. The data dir must contain a dir for each fold "
                          "labeled by a number")
 parser.add_argument("--single_fold", type=str, default="",
                     help="If a positive number only run the specific fold, instead of all")
@@ -80,6 +86,13 @@ if not args.skip_eval_best:
     args.eval_data = os.path.abspath(os.path.expanduser(args.eval_data))
     if not os.path.exists(args.eval_data):
         raise Exception("Evaluation dir does not exist at '%s'" % args.eval_data)
+
+
+def run_cmd(threads):
+    if args.run:
+        return args.run.split(args.run.format({"threads": threads}))
+    else:
+        return []
 
 
 def mkdir(path):
@@ -193,17 +206,19 @@ def train_single_fold(fold_dir):
 
     with open(train_log, 'w') as train_log_file:
         process = []
-        for line in run(["python2", args.rtrain, tensorflow_arg, "--preload",
-                        "--network", args.network,
-                                    # "--threads", 1, "--batch_size", 1, "-r", "1e-3",
-                                    "--ntrain", str(args.ntrain),
-                                    "--codec", os.path.join(train_dir, "*", "*.gt.txt")] +
+        for line in run(run_cmd(1) +
+                        ["python2", args.rtrain, tensorflow_arg,
+                         "--network", args.network,
+                         "--threads", 1,
+                         # "--batch_size", 1, "-r", "1e-3",
+                         "--ntrain", str(args.ntrain),
+                         "--codec", os.path.join(train_dir, "*", "*.gt.txt")] +
                         (["--load", args.load] if args.load else []) +
                         (["--load_pretrained"] if args.load_pretrained else []) +
                         [
-                                    "-o", os.path.join(models_dir, model_prefix),
-                                    os.path.join(train_dir, "*", "*.png"),
-                                    ], process):
+                            "-o", os.path.join(models_dir, model_prefix),
+                            os.path.join(train_dir, "*", "*.png"),
+                        ], process):
             if args.verbose:
                 print("Fold %s: %s" % (fold_dir, line.strip()))
             train_log_file.write(line + "\n")
@@ -223,7 +238,7 @@ print("Starting the training")
 
 if args.skip_train:
     print("Skipping")
-elif args.n_parallel <= 1:
+elif args.n_parallel == 1:
     list(map(train_single_fold, fold_dirs))
 else:
     multi_pool = multiprocessing.Pool(args.n_parallel)
@@ -247,7 +262,6 @@ if not args.skip_test:
 
     if number_of_models == 0:
         raise Exception("No models to test found in '%s' with prefix '%s'!" % (best_models_dir, model_prefix))
-
 
     mkdir(best_models_dir)
 
@@ -299,7 +313,8 @@ def test_single_fold(fold_dir):
         for model in all_models:
             print("Fold %s: Testing model %s" % (fold_dir, model))
             model_path = os.path.join(models_dir, model)
-            for line in run(["python2", args.rpred, tensorflow_arg,
+            for line in run(run_cmd(1) +
+                            ["python2", args.rpred, tensorflow_arg,
                              "-m", model_path,
                              os.path.join(test_dir, "*", "*.png")]):
                 if args.verbose:
@@ -308,7 +323,8 @@ def test_single_fold(fold_dir):
                 test_log_file.flush()
 
             print("Fold %s: Running econf of model %s" % (fold_dir, model))
-            process = subprocess.Popen(["python2", args.econf,
+            process = subprocess.Popen(run_cmd(1) +
+                                       ["python2", args.econf,
                                         os.path.join(test_dir, "*", "*.gt.txt")],
                                        stdout=subprocess.PIPE)
             out, err = process.communicate()
@@ -337,7 +353,7 @@ def test_single_fold(fold_dir):
 
 if args.skip_test:
     print("Skipping")
-elif args.n_parallel <= 1:
+elif args.n_parallel == 1:
     list(map(test_single_fold, fold_dirs))
 else:
     multi_pool = multiprocessing.Pool(args.n_parallel)
@@ -351,52 +367,29 @@ print("Starting evaluation of best models")
 
 best_models = list_models(best_models_dir)
 
-
-def eval_single_model(model_path):
-    print("Testing %s" % model_path)
-
-    for line in run(["python2", args.rpred, tensorflow_arg,
-                     "-m", model_path,
-                     os.path.join(args.eval_data, "*.png")]):
-        if args.verbose:
-            print("Fold %s: %s" % (fold_dir, line.strip()))
-
-    print("Evaluating %s" % model_path)
-    process = subprocess.Popen(["python2", args.econf,
-                                os.path.join(args.eval_data, "*.gt.txt")],
-                               stdout=subprocess.PIPE)
-    out, err = process.communicate()
-    output = out.decode("utf-8")
-    if args.verbose:
-        print(output)
-
-    line_data = extract_line_data(output)
-
-    return float(line_data["err"])
-
-
 if args.skip_eval_best:
     print("Skipping")
 else:
     with codecs.open(os.path.join(args.root_dir, "%s_eval.csv" % model_prefix), 'w', 'utf-8') as eval_file:
         eval_file.write("model,err\n")
 
-        if args.eval:
-            process = subprocess.Popen(["python", args.eval,
-                             "--models"] + [os.path.join(best_models_dir, m) for m in best_models] +
-                            ["--ground_truth", os.path.join(args.eval_data, "*.gt.txt"),
-                             "--files", os.path.join(args.eval_data, "*.png"),
-                             "--batch_size", "50", "--threads", "8"],
-                                       stdout=subprocess.PIPE)
+        def evaluate_single_model(model):
+            process = subprocess.Popen(run_cmd(8) +
+                                       ["python", args.eval,
+                                        "--models"] + [os.path.join(best_models_dir, model)] +
+                                       ["--ground_truth", os.path.join(args.eval_data, "*.gt.txt"),
+                                        "--files", os.path.join(args.eval_data, "*.png"),
+                                        "--batch_size", "50", "--threads", "8"],
+                                   stdout=subprocess.PIPE)
+
             out, err = process.communicate()
             output = out.decode("utf-8")
-            eval_file.write(output)
-            print(output)
-        else:
-            for best_model in best_models:
-                err = eval_single_model(os.path.join(best_models_dir, best_model))
-                eval_file.write("%s,%f\n" % (best_model, err))
-                print("%s, %f" % (best_model, err))
+            return output
+
+        pool = multiprocessing.Pool(processes=len(best_models))
+        output = pool.map(evaluate_single_model, best_models)
+        for m, o in zip(best_models, output):
+            eval_file.write(o + "\n")
 
 
 print("Evaluation finished")

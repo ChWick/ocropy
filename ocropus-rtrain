@@ -227,7 +227,7 @@ else:
     last_save = None
     if args.tensorflow:
         import ocrolib.tensorflow as tf_backend
-        network = tf_backend.SequenceRecognizer(args.height, args.hiddensize,
+        network = tf_backend.SequenceRecognizer(args.height,
                                                 model_settings=tensorflow_model.Model.parse_model_settings(args.network),
                                                 codec=codec, normalize=lstm.normalize_nfkc)
     else:

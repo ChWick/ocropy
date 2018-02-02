@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 
 class SequenceRecognizer:
     @staticmethod
-    def load(fname, model_settings=None, pretrained=False, codec=None):
+    def load(fname, model_settings=None, pretrained=False, codec=None, threads=1):
         import ocrolib
         data = ocrolib.load_object(fname)
         data["load_file"] = fname
@@ -17,13 +17,23 @@ class SequenceRecognizer:
             # overwrite codec with new codec
             data["codec"] = codec
         data["pretrained"] = pretrained
+        data["threads"] = threads
         if model_settings:
             # only override if desired
             data["model_settings"] = model_settings
         return SequenceRecognizer(**data)
 
     """Perform sequence recognition using BIDILSTM and alignment."""
-    def __init__(self, Ni, nstates=-1, No=-1, codec=None, normalize=normalize_nfkc, load_file=None, lnorm=None, pretrained=False, model_settings=None):
+    def __init__(self,
+                 Ni,
+                 No=-1,
+                 codec=None,
+                 normalize=normalize_nfkc,
+                 load_file=None,
+                 lnorm=None,
+                 pretrained=False,
+                 model_settings=None,
+                 threads=1):
         self.Ni = Ni
         if codec: No = codec.size()
         self.No = No + 1
@@ -40,12 +50,12 @@ class SequenceRecognizer:
 
         if load_file is not None:
             if pretrained:
-                self.model = Model.create(self.Ni, self.No, self.model_settings)
+                self.model = Model.create(self.Ni, self.No, self.model_settings, threads=threads)
                 self.model.load_weights(load_file)
             else:
-                self.model = Model.load(load_file)
+                self.model = Model.load(load_file, threads=threads)
         else:
-            self.model = Model.create(self.Ni, self.No, self.model_settings)
+            self.model = Model.create(self.Ni, self.No, self.model_settings, threads=threads)
         self.command_log = []
         self.error_log = []
         self.cerror_log = []

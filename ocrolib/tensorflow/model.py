@@ -117,12 +117,13 @@ class Model:
 
 
     @staticmethod
-    def load(filename):
+    def load(filename, threads):
         print("Loading tensorflow model from root %s" % filename)
         graph = tf.Graph()
         with graph.as_default() as g:
             session = tf.Session(graph=graph,
-                                 # config=tf.ConfigPrototo(intra_op_parallelism_threads=10),
+                                 config=tf.ConfigPrototo(intra_op_parallelism_threads=threads,
+                                                         inter_op_parallelism_threads=threads),
                                 )
             with tf.variable_scope("", reuse=False) as scope:
 
@@ -155,13 +156,13 @@ class Model:
                 return Model(graph, session, inputs, seq_len, seq_len_out, targets, train_op, cost, ler, decoded, logits, l_rate)
 
     @staticmethod
-    def create(num_features, num_classes, model_settings, reuse_variables=False):
+    def create(num_features, num_classes, model_settings, reuse_variables=False, threads=1):
         print("Creating tf graph with settings: %s" % model_settings)
         graph = tf.Graph()
         with graph.as_default():
             session = tf.Session(graph=graph,
-                                 config=tf.ConfigProto(intra_op_parallelism_threads=1,
-                                                       inter_op_parallelism_threads=1,
+                                 config=tf.ConfigProto(intra_op_parallelism_threads=threads,
+                                                       inter_op_parallelism_threads=threads,
                                                        ))
 
             inputs = tf.placeholder(tf.float32, shape=(None, None, num_features), name="inputs")
