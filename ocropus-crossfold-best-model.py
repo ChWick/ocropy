@@ -127,6 +127,10 @@ fold_root_dir = os.path.join(args.root_dir, fold_dir_)
 mkdir(fold_root_dir)
 
 
+print("Fold root dir: %s" % fold_root_dir)
+print("Best models dir: %s" % best_models_dir)
+
+
 def setup_dirs():
     base_dir = os.path.abspath(os.curdir)
 
@@ -232,20 +236,20 @@ print("Training Finished")
 print("Running models on test set")
 
 
+if not args.skip_test:
+    # prerequisites, all splits have equal amount of models
+    number_of_models = len(list_models(os.path.join(fold_dirs[0], 'models')))
+    for fold_dir in fold_dirs:
+        this_number_of_models = len(list_models(os.path.join(fold_dirs[0], 'models')))
+        if this_number_of_models != number_of_models:
+            raise Exception("Mismatch in number of models of fold '%s': %d  vs %d"
+                            % (fold_dir, this_number_of_models, number_of_models))
 
-# prerequisites, all splits have equal amount of models
-number_of_models = len(list_models(os.path.join(fold_dirs[0], 'models')))
-for fold_dir in fold_dirs:
-    this_number_of_models = len(list_models(os.path.join(fold_dirs[0], 'models')))
-    if this_number_of_models != number_of_models:
-        raise Exception("Mismatch in number of models of fold '%s': %d  vs %d"
-                        % (fold_dir, this_number_of_models, number_of_models))
-
-if number_of_models == 0:
-    raise Exception("No models to test found!")
+    if number_of_models == 0:
+        raise Exception("No models to test found in '%s' with prefix '%s'!" % (best_models_dir, model_prefix))
 
 
-mkdir(best_models_dir)
+    mkdir(best_models_dir)
 
 
 def copy_model(model, models_dir, output_name, output_dir):
