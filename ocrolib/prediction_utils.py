@@ -53,7 +53,7 @@ def process_model(args):
     model, inputs = args
     print("Starting model %s" % model["path"])
     network, model = load_network(model)
-    load_pool = multiprocessing.Pool(processes=model["load_threads"] if "load_threads" in model else model["threads"])
+    load_pool = multiprocessing.Pool(processes=model["threads"])
     print("Loading data")
     lines = load_pool.map(prepare_one_for_model, [(fname, model) for fname in inputs])
     load_pool.close()

@@ -11,6 +11,13 @@ import pickle
 
 parser = argparse.ArgumentParser()
 
+# global setup
+parser.add_argument("--run", type=str, default="",
+                    help="All scripts commands will be passed to this command. {threads} will be replaced with the "
+                         "number of threads that are required for a single specific task. "
+                         "E. g. use 'srun --cpus-per-task {threads}' for slurm usage")
+parser.add_argument("--threads", default=1, type=int,
+                    help="The number of threads to use per model!")
 # evaluation setup
 parser.add_argument("-m", "--models", nargs="+", type=str, required=True,
                     help="The models to evaluate")
@@ -38,10 +45,6 @@ parser.add_argument("-c", "--confusion", default=10, type=int,
 
 parser.add_argument("--batch_size", default=100, type=int,
                     help="Batch size of the prediction")
-parser.add_argument("--threads", default=8, type=int,
-                    help="The number of threads to use")
-parser.add_argument("--load_threads", default=20, type=int,
-                    help="The number of threads to use")
 
 args = parser.parse_args()
 if args.output:
@@ -95,14 +98,14 @@ models = [
      "height": args.height,
      "nolineest": args.nolineest,
      "threads": args.threads,
-     "load_threads": args.load_threads if args.load_threads > 0 else args.theads,
+     "load_threads": args.threads,
      "pad": args.pad,
      "predict": "decode_probabilities",
      }
     for m in models
 ]
 
-pool = multiprocessing.pool.ThreadPool(processes=min(len(models), args.threads))
+pool = multiprocessing.pool.ThreadPool(processes=len(models))
 output = pool.map(process_model, [(model, inputs) for model in models])
 #pickle.dump(output, open(os.path.expanduser("~/test.dump"), 'w'))
 #output = pickle.load(open(os.path.expanduser("~/test.dump"), 'r'))

@@ -374,23 +374,21 @@ else:
     with codecs.open(os.path.join(args.root_dir, "%s_eval.csv" % model_prefix), 'w', 'utf-8') as eval_file:
         eval_file.write("model,err\n")
 
-        def evaluate_single_model(model):
-            process = subprocess.Popen(run_cmd(8) +
-                                        ["python", args.eval,
-                                        "--models", os.path.join(best_models_dir, model)] +
-                                       ["--ground_truth", os.path.join(args.eval_data, "*.gt.txt"),
-                                        "--files", os.path.join(args.eval_data, "*.png"),
-                                        "--batch_size", "50", "--threads", "8"],
-                                   stdout=subprocess.PIPE)
+        # all models must be evaluated at the same time to enable voting
+        threads_per_model = 8
+        total_threads = len(best_models) * threads_per_model
+        process = subprocess.Popen(run_cmd(total_threads) + ["python", args.eval,
+                                    "--models"] + [os.path.join(best_models_dir, m) for m in best_models] +
+                                   ["--ground_truth", os.path.join(args.eval_data, "*.gt.txt"),
+                                    "--files", os.path.join(args.eval_data, "*.png"),
+                                    "--batch_size", "50",
+                                    "--threads", str(threads_per_model),
+                                    "--run", args.run],
+                               stdout=subprocess.PIPE)
 
-            out, err = process.communicate()
-            output = out.decode("utf-8")
-            return output
-
-        pool = multiprocessing.Pool(processes=len(best_models))
-        output = pool.map(evaluate_single_model, best_models)
-        for m, o in zip(best_models, output):
-            eval_file.write(o + "\n")
+        out, err = process.communicate()
+        output = out.decode("utf-8")
+        eval_file.write(output)
 
 
 print("Evaluation finished")
