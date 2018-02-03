@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 import codecs
 #import ocrolib.tensorflow.model as tf_model
 
@@ -109,14 +110,21 @@ def symlink(source, name, is_dir=True):
 
 
 def run(command, process_out_list=[]):
+    print(" ".join(command))
     process = subprocess.Popen(command, stdout=subprocess.PIPE, shell=False)
     process_out_list.append(process)
     while True:
         line = process.stdout.readline().rstrip().decode("utf-8")
-        if not line:
+
+        # check if process has finished
+        if process.poll() is not None:
             break
 
-        yield line
+        # check if output is present
+        if line is None:
+            time.sleep(0.1)
+        else:
+            yield line
 
 
 def list_models(models_dir, file_ending="pyrnn.gz"):
@@ -377,18 +385,16 @@ else:
         # all models must be evaluated at the same time to enable voting
         threads_per_model = 8
         total_threads = len(best_models) * threads_per_model
-        process = subprocess.Popen(run_cmd(total_threads) + ["python", args.eval,
+        for line in run(run_cmd(total_threads) + ["python", args.eval,
                                     "--models"] + [os.path.join(best_models_dir, m) for m in best_models] +
                                    ["--ground_truth", os.path.join(args.eval_data, "*.gt.txt"),
                                     "--files", os.path.join(args.eval_data, "*.png"),
                                     "--batch_size", "50",
-                                    "--threads", str(threads_per_model),
-                                    "--run", args.run],
-                               stdout=subprocess.PIPE)
+                                    "--threads", str(total_threads),
+                                    ]):
 
-        out, err = process.communicate()
-        output = out.decode("utf-8")
-        eval_file.write(output)
+            print(line)
+            eval_file.write(line)
 
 
 print("Evaluation finished")

@@ -123,8 +123,10 @@ class Model:
         with graph.as_default() as g:
             session = tf.Session(graph=graph,
                                  config=tf.ConfigProto(intra_op_parallelism_threads=threads,
-                                                       inter_op_parallelism_threads=threads),
-                                )
+                                                       inter_op_parallelism_threads=threads,
+                                                       #session_inter_op_thread_pool=[{'num_threads': threads}],
+                                                       #use_per_session_threads=True,
+                                ))
             with tf.variable_scope("", reuse=False) as scope:
 
                 saver = tf.train.import_meta_graph(filename + '.meta')
