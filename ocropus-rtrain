@@ -22,6 +22,10 @@ import ocrolib.tensorflow.model as tensorflow_model
 
 np.seterr(divide='raise',over='raise',invalid='raise',under='ignore')
 
+# only one thread to train, do not use GPU
+os.environ['OMP_NUM_THREADS'] = "1"
+os.environ['CUDA_VISIBLE_DEVICES'] = ""
+
 parser = argparse.ArgumentParser("train an RNN recognizer")
 
 # line normalization
@@ -229,7 +233,7 @@ else:
         import ocrolib.tensorflow as tf_backend
         network = tf_backend.SequenceRecognizer(args.height,
                                                 model_settings=tensorflow_model.Model.parse_model_settings(args.network),
-                                                codec=codec, normalize=lstm.normalize_nfkc)
+                                                codec=codec, normalize=lstm.normalize_nfkc, threads=args.threads)
     else:
         network = lstm.SeqRecognizer(args.height,args.hiddensize,
             codec=codec,

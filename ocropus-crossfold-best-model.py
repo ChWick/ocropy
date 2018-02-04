@@ -1,5 +1,6 @@
 import argparse
 import multiprocessing
+import sys
 import os
 import re
 import shutil
@@ -19,6 +20,10 @@ parser.add_argument("--run", type=str, default="",
                     help="All scripts commands will be passed to this command. {threads} will be replaced with the "
                          "number of threads that are required for a single specific task. "
                          "E. g. use 'srun --cpus-per-task {threads}' for slurm usage")
+parser.add_argument("--n_parallel", type=int, default=-1,
+                    help="Number of parallel models to swapn, if negative (default), all models will be spawned immediately.")
+parser.add_argument("--python", type=str, default="python2",
+                    help="Path to a python executable, may be in a venv!")
 
 # folds setup
 parser.add_argument("--root_dir", type=str, default="",
@@ -29,8 +34,6 @@ parser.add_argument("--single_fold", type=str, default="",
 parser.add_argument("--verbose", action="store_true",
                     help="Verbose mode print all output of the several programs to the console. It is always written "
                     "to log files")
-parser.add_argument("--n_parallel", type=int, default=-1,
-                    help="Number of parallel models to run. Defaults to the number of folds")
 
 # training setup
 parser.add_argument("--skip_train", action="store_true")
@@ -195,9 +198,6 @@ if len(args.single_fold) > 0:
 
 fold_dirs = [os.path.join(fold_root_dir, fold_dir_) for fold_dir_ in data_fold_dirs_]
 
-if args.n_parallel <= 0:
-    args.n_parallel = len(fold_dirs)
-
 
 
 # training function that can be parallel
@@ -216,9 +216,9 @@ def train_single_fold(fold_dir):
     with open(train_log, 'w') as train_log_file:
         process = []
         for line in run(run_cmd(1) +
-                        ["python2", args.rtrain, tensorflow_arg,
+                        [args.python, args.rtrain, tensorflow_arg,
                          "--network", args.network,
-                         "--threads", 1,
+                         "--threads", "1",
                          # "--batch_size", 1, "-r", "1e-3",
                          "--ntrain", str(args.ntrain),
                          "--codec", os.path.join(train_dir, "*", "*.gt.txt")] +
@@ -250,7 +250,7 @@ if args.skip_train:
 elif args.n_parallel == 1:
     list(map(train_single_fold, fold_dirs))
 else:
-    multi_pool = multiprocessing.Pool(args.n_parallel)
+    multi_pool = multiprocessing.Pool(processes=args.n_parallel if args.n_parallel > 0 else len(fold_dirs))
     multi_pool.map(train_single_fold, fold_dirs)
     multi_pool.close()
 
@@ -319,55 +319,48 @@ def test_single_fold(fold_dir):
         current_best_model = ""
         current_best_error = 1000
 
-        for model in all_models:
-            print("Fold %s: Testing model %s" % (fold_dir, model))
-            model_path = os.path.join(models_dir, model)
-            for line in run(run_cmd(1) +
-                            ["python2", args.rpred, tensorflow_arg,
-                             "-m", model_path,
-                             os.path.join(test_dir, "*", "*.png")]):
-                if args.verbose:
-                    print("Fold %s: %s" % (fold_dir, line.strip()))
-                test_log_file.write(line + "\n")
-                test_log_file.flush()
+        best_model_re = re.compile("^best_model_path \(score\): (.*) \(([0-9.]+)\)$")
 
-            print("Fold %s: Running econf of model %s" % (fold_dir, model))
-            process = subprocess.Popen(run_cmd(1) +
-                                       ["python2", args.econf,
-                                        os.path.join(test_dir, "*", "*.gt.txt")],
-                                       stdout=subprocess.PIPE)
-            out, err = process.communicate()
-            output = out.decode("utf-8")
+        all_model_paths = [os.path.join(models_dir, model) for model in all_models]
+        for line in run(run_cmd(16) + [args.python, args.eval,
+                                    "--models"] + all_model_paths+
+                                   ["--ground_truth", os.path.join(test_dir, "*", "*.gt.txt"),
+                                    "--files", os.path.join(test_dir, "*", "*.png"),
+                                    "--batch_size", "50",
+                                    "--threads", str(16),
+                                    "--output_best_only",
+                                    ]):
+
             if args.verbose:
-                print(output)
-            test_log_file.write(output + "\n")
-            test_log_file.flush()
+                print("Fold %s: %s" % (fold_dir, line.strip()))
 
-            line_data = extract_line_data(output)
-            eval_csv_file.write(model + "," + ",".join([line_data[title] for title in eval_lines_to_extract]) + "\n")
-
-            error = float(line_data["err"])
-            if float(error) <= current_best_error:
-                current_best_model = model
-                current_best_error = float(error)
-
-            print(output.split("\n")[-1])
+            match = best_model_re.match(line.strip())
+            if match:
+                current_best_model = all_models[all_model_paths.index(match.group(1))]
+                current_best_error = float(match.group(2))
 
         print("Fold %s: Best model is %s with error of %s %%" % (fold_dir, current_best_model, current_best_error))
         copy_model(current_best_model, models_dir, "%s_%s.pyrnn.gz" % (model_prefix, fold), best_models_dir)
         print("Copied best model to %s" % best_models_dir)
 
     print("Finished testing for fold '%s'" % fold_dir)
+    return current_best_model, current_best_error
 
 
 if args.skip_test:
     print("Skipping")
+    best_model_accuracy = None
 elif args.n_parallel == 1:
-    list(map(test_single_fold, fold_dirs))
+    best_model_accuracy = list(map(test_single_fold, fold_dirs))
 else:
-    multi_pool = multiprocessing.Pool(args.n_parallel)
-    multi_pool.map(test_single_fold, fold_dirs)
+    multi_pool = multiprocessing.Pool(processes=args.n_parallel if args.n_parallel > 0 else len(fold_dirs))
+    best_model_accuracy = multi_pool.map(test_single_fold, fold_dirs)
     multi_pool.close()
+
+if best_model_accuracy:
+    print("Best model\tAcc")
+    for best_model, best_error in best_model_accuracy:
+        print("%s\t%f" % (best_model, best_error))
 
 print("Testing Finished")
 
@@ -380,21 +373,27 @@ if args.skip_eval_best:
     print("Skipping")
 else:
     with codecs.open(os.path.join(args.root_dir, "%s_eval.csv" % model_prefix), 'w', 'utf-8') as eval_file:
-        eval_file.write("model,err\n")
 
         # all models must be evaluated at the same time to enable voting
         threads_per_model = 8
         total_threads = len(best_models) * threads_per_model
-        for line in run(run_cmd(total_threads) + ["python", args.eval,
+        evaluation_result = None
+        for line in run(run_cmd(total_threads) + [args.python, args.eval,
                                     "--models"] + [os.path.join(best_models_dir, m) for m in best_models] +
                                    ["--ground_truth", os.path.join(args.eval_data, "*.gt.txt"),
                                     "--files", os.path.join(args.eval_data, "*.png"),
                                     "--batch_size", "50",
                                     "--threads", str(total_threads),
+                                    "--output_evaluation",
                                     ]):
 
-            print(line)
-            eval_file.write(line)
+            if line.startswith("Evaluation result:"):
+                evaluation_result = line
 
+        if evaluation_result is None:
+            raise Exception("Evaluation did not yield an parsable output")
+
+        eval_file.write(evaluation_result)
+        print(evaluation_result)
 
 print("Evaluation finished")

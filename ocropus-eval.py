@@ -27,6 +27,12 @@ parser.add_argument("-f", "--files", nargs="+", type=str, required=True,
 
 parser.add_argument("-o", "--output", type=str, required=False,
                     help="A directory where to output the prediction")
+parser.add_argument("--output_best_only", action="store_true", default=False,
+                    help="Print the best model as 'model_name,score' as the final output"
+                         "Voting is deactivated.")
+parser.add_argument("--output_evaluation", action="store_true", default=False,
+                    help="Print all evaluated data as: model1,...,modeln,avg,votes")
+                    
 
 parser.add_argument("-l", "--height", default=-1, type=int,
                     help="target line height (overrides recognizer)")
@@ -199,33 +205,50 @@ def compute_voting(output, voter_type):
     return total_err * 1.0 / total_chars, counts
 
 
+if args.output_best_only:
+    current_best_model = ""
+    current_best_error = 1000
+    for model, (score, counts, total_errs, total_chars) in zip(models, scores):
+        if score < current_best_error:
+            current_best_error = score
+            current_best_model = model
 
-print("Index\tName\tScore\tTotal Errs\tTotal Chars")
-for i, (model, (score, counts, total_errs, total_chars)) in enumerate(zip(models, scores)):
-    print("%03d\t%s\t%f\t%d\t%d" % (i, model['path'], score, total_errs, total_chars))
+    # keep this output fixed, so it can be parsed by outher programs
+    print("best_model_path (score): %s (%f)" % (current_best_model["path"], current_best_error))
+
+else:
+    print("Index\tName\tScore\tTotal Errs\tTotal Chars")
+    for i, (model, (score, counts, total_errs, total_chars)) in enumerate(zip(models, scores)):
+        print("%03d\t%s\t%f\t%d\t%d" % (i, model['path'], score, total_errs, total_chars))
 
 
-print("Confusion matrices")
-for i, (model, (score, counts, total_errs, total_chars)) in enumerate(zip(models, scores)):
-    print("%03d\t%s\t%f" % (i, model['path'], score))
-    if args.confusion > 0:
-        for (a, b), v in counts.most_common(args.confusion):
-            print("%d\t%s\t%s" % (v, a.encode("utf-8"), b.encode("utf-8")))
-
-
-if len(models) > 1:
-    print("Voting %d models" % len(models))
-    def run_vote(voter):
-        voted_err, voted_counts = compute_voting(output, voter)
-        print("%s\t%s\t%f" % (voter, "Voted", voted_err))
+    print("Confusion matrices")
+    for i, (model, (score, counts, total_errs, total_chars)) in enumerate(zip(models, scores)):
+        print("%03d\t%s\t%f" % (i, model['path'], score))
         if args.confusion > 0:
-            for (a, b), v in voted_counts.most_common(args.confusion):
+            for (a, b), v in counts.most_common(args.confusion):
                 print("%d\t%s\t%s" % (v, a.encode("utf-8"), b.encode("utf-8")))
 
-    for voter in ["sequence", "prob"]:
-        run_vote(voter)
-else:
-    print("No voting required")
 
+    if len(models) > 1:
+        print("Voting %d models" % len(models))
+        def run_vote(voter):
+            voted_err, voted_counts = compute_voting(output, voter)
+            print("%s\t%s\t%f" % (voter, "Voted", voted_err))
+            if args.confusion > 0:
+                for (a, b), v in voted_counts.most_common(args.confusion):
+                    print("%d\t%s\t%s" % (v, a.encode("utf-8"), b.encode("utf-8")))
 
+            return voted_err
 
+        voted_eval = map(run_vote, ["prob", "sequence"])
+    else:
+        print("No voting required")
+
+    if args.output_evaluation:
+        s = "Evaluation result:\t" \
+            + ",".join(
+                    [str(score[0]) for score in scores] \
+                    + [str(sum([score[0] for score in scores]) / len(scores))] \
+                    + list(map(str, voted_eval)))
+        print(s)
