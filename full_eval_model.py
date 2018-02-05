@@ -4,6 +4,7 @@ import argparse
 import os
 import numpy as np
 import sys
+import time
 
 parser = argparse.ArgumentParser()
 
@@ -76,8 +77,10 @@ def run(command, process_out_list=[]):
 def iters_for_lines(lines):
     return int(np.interp(lines, [60, 100, 150, 250, 500, 1000], [10000, 13000, 15000, 20000, 25000, 30000]))
 
+
 def line_dirs_for_train_dir(train_dir):
     line_dirs_ = [d for d in os.listdir(train_dir) if os.path.isdir(os.path.join(train_dir, d)) and int(d)]
+    line_dirs_ = sorted(line_dirs_, key=lambda k: int(k))
     print("Found line dirs %s" % line_dirs_)
     if len(line_dirs_) == 0:
         raise Exception("No line dirs found in Train dir '%s'" % train_dir)
