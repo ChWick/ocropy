@@ -27,6 +27,7 @@ class Model:
             ],
             "use_peepholes": False,
             "ctc_merge_repeated": False,
+            "dropout": False,
         }
 
     @staticmethod
@@ -36,13 +37,13 @@ class Model:
             if layer["type"] == "cnn":
                 out_parts.append("cnn_%d_%dx%d" % (layer["filters"], layer["kernel_size"][0], layer["kernel_size"][1]))
             elif layer["type"] == "pool":
-                out_parts.append("pool_%dx%d" % (layer["kernel_size"][0], layer["kernel_size"][1]))
+                out_parts.append("pool_%dx%d:%dx%d" % (layer["kernel_size"][0], layer["kernel_size"][1], layer["stride"][0], layer["stride"][1]))
             elif layer["type"] == "lstm":
                 out_parts.append("lstm_%d" % (layer["hidden"], ))
             else:
                 raise Exception("Unknown layer type '%s'" % layer["type"])
 
-        for flag in ["use_peepholes", "ctc_merge_repeated"]:
+        for flag in ["use_peepholes", "ctc_merge_repeated", "dropout"]:
             out_parts.append("%s_%s" % (flag, ("false", "true")[model_settings[flag]]))
 
         return "__".join(out_parts)
@@ -52,21 +53,21 @@ class Model:
     @staticmethod
     def parse_model_settings(str):
         cnn_matcher = re.compile("^([\d]+)(:([\d]+)(x([\d]+))?)?$")
-        pool_matcher = re.compile("^([\d]+)(x([\d]+))?$")
+        pool_matcher = re.compile("^([\d]+)(x([\d]+))?(:([\d]+)x([\d]+))?$")
         params = str.split(",")
         model = []
         lstm_appeared = False
         params_dict = {
             "ctc_merge_repeated": True,
             "use_peepholes": False,
+            "dropout": False,
             "layers": model,
         }
         for param in params:
             label, value = tuple(param.split("="))
-            if label == "ctc_merge_repeated":
-                params_dict["ctc_merge_repeated"] = value.lower == "true"
-            elif label == "use_peepholes":
-                params_dict["use_peepholes"] = value.lower == "true"
+            flags = ["use_peepholes", "ctc_merge_repeated", "dropout"]
+            if label in flags:
+                params_dict[label] = value.lower == "true"
             elif label == "lstm":
                 lstm = {
                     "type": "lstm",
@@ -106,9 +107,16 @@ class Model:
                 if match[1] is not None:
                     kernel_size = [int(match[0]), int(match[2])]
 
+                if match[3] is not None:
+                    stride = [int(match[4]), int(match[5])]
+                else:
+                    stride = kernel_size
+
+
                 pool = {
                     "type": "pool",
-                    "kernel_size": kernel_size
+                    "kernel_size": kernel_size,
+                    "stride": stride,
                 }
                 model.append(pool)
 
@@ -141,6 +149,12 @@ class Model:
                     print("loaded old model!")
                     seq_len_out = seq_len / 4
 
+                try:
+                    dropout_rate = g.get_tensor_by_name("dropout_rate:0")
+                except:
+                    print("loaded old model without dropout rate")
+                    dropout_rate = tf.placeholder(tf.float32, shape=(), name="dropout_rate")
+
                 targets = tf.SparseTensor(
                     g.get_tensor_by_name("targets/indices:0"),
                     g.get_tensor_by_name("targets/values:0"),
@@ -155,7 +169,7 @@ class Model:
                     )
                 logits = g.get_tensor_by_name("softmax:0")
 
-                return Model(graph, session, inputs, seq_len, seq_len_out, targets, train_op, cost, ler, decoded, logits, l_rate)
+                return Model(graph, session, inputs, seq_len, seq_len_out, targets, train_op, cost, ler, decoded, logits, l_rate, dropout_rate)
 
     @staticmethod
     def create(num_features, num_classes, model_settings, reuse_variables=False, threads=1):
@@ -172,6 +186,7 @@ class Model:
             seq_len = tf.placeholder(tf.int32, shape=(None,), name="seq_len")
             targets = tf.sparse_placeholder(tf.int32, shape=(None, None), name="targets")
             l_rate = tf.placeholder(tf.float32, shape=(), name="l_rate")
+            dropout_rate = tf.placeholder(tf.float32, shape=(), name="dropout_rate")
 
             with tf.variable_scope("", reuse=reuse_variables) as scope:
                 has_conv_or_pool = model_settings["layers"][0]["type"] != "lstm"
@@ -197,7 +212,8 @@ class Model:
                             layers.append(tf.layers.max_pooling2d(
                                 inputs=layers[-1],
                                 pool_size=model["kernel_size"],
-                                strides=model["kernel_size"],
+                                strides=model["stride"],
+                                padding="same",
                             ))
 
                             shape = (tf.to_int32(shape[0] / model["kernel_size"][0]),
@@ -242,6 +258,9 @@ class Model:
 
                 # flatten to (N * T, F) for matrix multiplication. This will be reversed later
                 outputs = tf.reshape(outputs, [-1, outputs.shape.as_list()[2]])
+
+                if model_settings["dropout"]:
+                    outputs = tf.nn.dropout(outputs, 1 - dropout_rate, name="dropout")
 
                 W = tf.get_variable('W', initializer=tf.random_uniform([output_size, num_classes], -0.1, 0.1))
                 b = tf.get_variable('B', initializer=tf.constant(0., shape=[num_classes]))
@@ -293,9 +312,9 @@ class Model:
 
                 lstm_seq_len = tf.identity(lstm_seq_len, "seq_len_out")
 
-                return Model(graph, session, inputs, seq_len, lstm_seq_len, targets, train_op, cost, ler, sparse_decoded, softmax, l_rate)
+                return Model(graph, session, inputs, seq_len, lstm_seq_len, targets, train_op, cost, ler, sparse_decoded, softmax, l_rate, dropout_rate)
 
-    def __init__(self, graph, session, inputs, seq_len, seq_len_out, targets, optimizer, cost, ler, sparse_decoded, logits, l_rate):
+    def __init__(self, graph, session, inputs, seq_len, seq_len_out, targets, optimizer, cost, ler, sparse_decoded, logits, l_rate, dropout_rate):
         self.graph = graph
         self.session = session
         self.inputs = inputs
@@ -309,6 +328,7 @@ class Model:
         self.logits = logits
         self.l_rate = l_rate
         self.default_learning_rate = -1
+        self.dropout_rate = dropout_rate
 
     def load_weights(self, model_file):
         with self.graph.as_default() as g:
@@ -399,19 +419,22 @@ class Model:
                                                               self.seq_len: len_x,
                                                               self.targets: y,
                                                               self.l_rate: self.default_learning_rate,
+                                                              self.dropout_rate: 0.5,
                                                               })
         logits = np.roll(logits, 1, axis=2)
         return cost, logits, ler, Model.sparse_to_lists(decoded, shift_values=1)
 
     def predict_sequence(self, x):
         x, len_x = self.sparse_data_to_dense(x)
-        logits, seq_len_out = self.session.run([self.logits, self.seq_len_out], feed_dict={self.inputs: x, self.seq_len: len_x})
+        logits, seq_len_out = self.session.run([self.logits, self.seq_len_out],
+                feed_dict={self.inputs: x, self.seq_len: len_x, self.dropout_rate: 0})
         logits = np.roll(logits, 1, axis=2)
         return logits, seq_len_out
 
     def decode_sequence(self, x):
         x, len_x = self.sparse_data_to_dense(x)
-        logits, seq_len, decoded, = self.session.run([self.logits, self.seq_len_out, self.decoded], feed_dict={self.inputs: x, self.seq_len: len_x})
+        logits, seq_len, decoded, = self.session.run([self.logits, self.seq_len_out, self.decoded],
+                feed_dict={self.inputs: x, self.seq_len: len_x, self.dropout_rate: 0})
         logits = np.roll(logits, 1, axis=2)
         decoded = Model.sparse_to_lists(decoded, shift_values=1)
         return logits, seq_len, decoded

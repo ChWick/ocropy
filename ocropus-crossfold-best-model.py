@@ -124,7 +124,7 @@ def run(command, process_out_list=[]):
             break
 
         # check if output is present
-        if line is None:
+        if line is None or len(line) == 0:
             time.sleep(0.1)
         else:
             yield line
