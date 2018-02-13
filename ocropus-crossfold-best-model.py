@@ -38,7 +38,8 @@ parser.add_argument("--verbose", action="store_true",
 # training setup
 parser.add_argument("--skip_train", action="store_true")
 parser.add_argument("--rtrain", type=str, default="ocropus-rtrain")
-parser.add_argument("--ntrain", type=int, default=30000,
+parser.add_argument("--no_early_stopping", action="store_true")
+parser.add_argument("--ntrain", type=int, default=200000,
                     help="# lines to train before stopping, default: %(default)s")
 parser.add_argument("--tensorflow", action='store_true')
 parser.add_argument("--load", type=str,
@@ -206,6 +207,7 @@ def train_single_fold(fold_dir):
     assert(os.path.exists(fold_dir))
 
     train_dir = os.path.join(fold_dir, 'train')
+    test_dir = os.path.join(fold_dir, 'test')
     models_dir = os.path.join(fold_dir, 'models')
     train_log = os.path.join(fold_dir, '%s_train.log' % model_prefix)
 
@@ -215,11 +217,19 @@ def train_single_fold(fold_dir):
 
     with open(train_log, 'w') as train_log_file:
         process = []
+        if args.no_early_stopping:
+            early_stopping_args = []
+        else:
+            early_stopping_args = [
+                "--validation", os.path.join(test_dir, "*", "*.png")
+            ]
         for line in run(run_cmd(1) +
                         [args.python, args.rtrain, tensorflow_arg,
+                         "--preload",
                          "--network", args.network,
                          "--threads", "1",
-                         # "--batch_size", 1, "-r", "1e-3",
+                         ] + early_stopping_args + [
+                         # "--batch_size", 1,
                          "--ntrain", str(args.ntrain),
                          "--codec", os.path.join(train_dir, "*", "*.gt.txt")] +
                         (["--load", args.load] if args.load else []) +
@@ -350,17 +360,25 @@ def test_single_fold(fold_dir):
 if args.skip_test:
     print("Skipping")
     best_model_accuracy = None
-elif args.n_parallel == 1:
-    best_model_accuracy = list(map(test_single_fold, fold_dirs))
-else:
-    multi_pool = multiprocessing.Pool(processes=args.n_parallel if args.n_parallel > 0 else len(fold_dirs))
-    best_model_accuracy = multi_pool.map(test_single_fold, fold_dirs)
-    multi_pool.close()
+elif args.no_early_stopping:
+    if args.n_parallel == 1:
+        best_model_accuracy = list(map(test_single_fold, fold_dirs))
+    else:
+        multi_pool = multiprocessing.Pool(processes=args.n_parallel if args.n_parallel > 0 else len(fold_dirs))
+        best_model_accuracy = multi_pool.map(test_single_fold, fold_dirs)
+        multi_pool.close()
 
-if best_model_accuracy:
-    print("Best model\tAcc")
-    for best_model, best_error in best_model_accuracy:
-        print("%s\t%f" % (best_model, best_error))
+    if best_model_accuracy:
+        print("Best model\tAcc")
+        for best_model, best_error in best_model_accuracy:
+            print("%s\t%f" % (best_model, best_error))
+else:
+    print("Copying best models of early stopping")
+    for fold_dir in fold_dirs:
+        fold = os.path.basename(os.path.normpath(fold_dir))
+        models_dir = os.path.join(fold_dir, 'models')
+        copy_model("best_model", models_dir, "%s_%s.pyrnn.gz" % (model_prefix, fold), best_models_dir)
+
 
 print("Testing Finished")
 
@@ -369,13 +387,16 @@ print("Starting evaluation of best models")
 
 best_models = list_models(best_models_dir)
 
-if args.skip_eval_best:
+if len(best_models) == 0:
+    raise Exception("No best models found in '%s'!" % best_models_dir)
+
+elif args.skip_eval_best:
     print("Skipping")
 else:
     with codecs.open(os.path.join(args.root_dir, "%s_eval.csv" % model_prefix), 'w', 'utf-8') as eval_file:
 
         # all models must be evaluated at the same time to enable voting
-        threads_per_model = 8
+        threads_per_model = 4
         total_threads = len(best_models) * threads_per_model
         evaluation_result = None
         for line in run(run_cmd(total_threads) + [args.python, args.eval,

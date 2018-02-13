@@ -14,6 +14,7 @@ import matplotlib.pyplot as plt
 
 import ocrolib
 import ocrolib.lstm as lstm
+from ocrolib.codec import Codec
 from ocrolib import lineest
 import traceback
 import time
@@ -41,6 +42,8 @@ parser.add_argument("--dewarp",action="store_true",
 # character set
 parser.add_argument("-c","--codec",default=[],nargs='*',
                     help="construct a codec from the input text")
+parser.add_argument("--repeated_chars_as_single", default=False, action="store_true",
+                    help="The codec handles doubled characters as not as two separated chars but as a new single one")
 
 # learning
 parser.add_argument("-T","--tensorflow",action="store_true",
@@ -83,6 +86,12 @@ parser.add_argument('--preload', action="store_true", default=False,
                     help="Load all all files into memory before running the learning algorithm.")
 parser.add_argument('--network', type=str, default="lstm=100",
                     help="Network structure that shall be used for training. Eg. 'cnn=60:3x3,pool=2x2,lstm=100")
+parser.add_argument('--validation', nargs="+",
+                    help="Validation files used for early stopping")
+parser.add_argument('--early_stopping_nbest', type=int, default=10,
+                    help="Number of models that must be worse than the current best to stop early")
+parser.add_argument('--early_stopping_best_model_prefix', type=str, default="best_model",
+                    help="The prefix of the best model using early stopping")
 
 # debugging
 parser.add_argument("-X","--exec",default="None",dest="execute",
@@ -105,6 +114,14 @@ if len(inputs)==0:
     sys.exit(0)
 
 print("# inputs", len(inputs))
+
+if args.validation:
+    args.validation = ocrolib.glob_all(args.validation)
+
+early_stopping_enabled = len(args.validation) > 0 and args.early_stopping_nbest > 1
+early_stopping_best_model = None
+early_stopping_best_error = 1
+early_stopping_best_last_model_iter = 0
 
 # make sure movie mode is used correctly
 
@@ -149,12 +166,12 @@ lnorm.setHeight(args.height)
 
 if args.codec!=[]:
     print("# building codec")
-    codec = lstm.Codec()
+    codec = Codec(double_as_extra=args.repeated_chars_as_single)
     charset = set()
     print(args.codec)
     for fname in ocrolib.glob_all(args.codec):
         transcript = ocrolib.read_text(fname)
-        l = list(lstm.normalize_nfkc(transcript))
+        l = codec.split(lstm.normalize_nfkc(transcript))
         charset = charset.union(l)
     charset = sorted(list(charset))
     charset = [c for c in charset if c>" " and c!="~"]
@@ -170,7 +187,7 @@ if len(charset)<200:
 else:
     s = "".join(charset)
     print("[" + s[:20], "...", s[-20:] + "]")
-codec = lstm.Codec().init(charset)
+codec = Codec(double_as_extra=args.repeated_chars_as_single).init(charset)
 
 
 # Load an existing network or construct a new one
@@ -332,10 +349,12 @@ def load_data(fname):
 
 thread_pool = Pool(processes=args.threads)
 
+
+loaded_validation_data = []
 loaded_data = {}
 if args.preload:
     print("Preloading data, this might take a while")
-    if args.batch_size > 1 and args.threads > 1:
+    if args.threads > 1:
         data = thread_pool.map_async(load_data, inputs).get(9999999)
     else:
         data = map(load_data, inputs)
@@ -349,8 +368,26 @@ if args.preload:
     print("All data loaded: size %s" % len(inputs))
 
 
+if early_stopping_enabled:
+    print("Preloading validation data for early stopping, this might take a while")
+    if args.threads > 1:
+        data = thread_pool.map_async(load_data, args.validation).get(9999999)
+    else:
+        data = map(load_data, args.validation)
+
+    for fname, line, cs, transcript in data:
+        if line is not None:
+            loaded_validation_data.append((fname, line, cs, transcript))
+        else:
+            args.validation.remove(fname)
+
+    print("All validation data loaded: size %s" % len(args.validation))
+
 global_start_time = time.time()
 last_save_time = time.time()
+
+total_train_time = 0
+total_trial_time = 0
 for trial in range(start,args.ntrain):
     #if (trial + 1) % 100000 == 0:
     #    args.lrate *= 0.1
@@ -417,17 +454,24 @@ for trial in range(start,args.ntrain):
     pred = re.sub(' ','_',pred)
     #gta = re.sub(' ','_',gta)
 
+
+    # Save file
+    file_saved = False
     if not args.freq_in_s and (trial+1)%args.savefreq==0:
         ofile = oname%(trial+1)+".gz"
         print("# saving", ofile)
         save_lstm(ofile,network)
         last_save = ofile
+        file_saved = True
 
     if args.freq_in_s and time.time() - last_save_time > args.savefreq:
         ofile = oname % (time.time() - global_start_time) + ".gz"
         save_lstm(ofile, network)
         last_save = ofile
         last_save_time = last_save_time + args.savefreq
+        file_saved = True
+
+
 
     if do_display:
         plt.figure("training",figsize=(1400//75,800//75),dpi=75)
@@ -442,3 +486,47 @@ for trial in range(start,args.ntrain):
     print(" * total time %f" % (trial_end - trial_start))
     print(" * train time %f" % (train_end - train_start))
 
+    total_trial_time += int((trial_end - trial_start) * 1000)
+    total_train_time += int((train_end - train_start) * 1000)
+
+    print(" * Avg. Time Per Trial: %f" % (total_trial_time / (trial + 1) / 1000.0))
+    print(" * Avg. Time Per Train: %f" % (total_train_time / (trial + 1) / 1000.0))
+
+    # check early stopping
+    if early_stopping_enabled and file_saved:
+        print("Checking early stopping model")
+        total_err = 0
+        total_chars = 0
+        for i in range(0, len(loaded_validation_data), args.batch_size):
+            data = loaded_validation_data[i:i+args.batch_size]
+            all_fnames, all_lines, all_cs, all_transcriptions = zip(*data)
+            all_decoded = network.decode_sequences(all_lines)
+            for decoded, trans in zip(all_decoded, all_transcriptions):
+                txt = decoded
+                total_err += ocrolib.edist.levenshtein(txt, trans)
+                total_chars += len(trans)
+
+        error_rate = float(total_err) / total_chars
+        print(" * Got error rate of %f" % error_rate)
+        if error_rate < early_stopping_best_error:
+            early_stopping_best_error = error_rate
+            early_stopping_best_model = last_save
+            early_stopping_best_last_model_iter = 1
+            print(" * Better model found!")
+        else:
+            # no better model
+            early_stopping_best_last_model_iter += 1
+            print(" * No better model found! Current best %s at iter %d"
+                  % (early_stopping_best_model, early_stopping_best_last_model_iter))
+
+        if early_stopping_best_last_model_iter >= args.early_stopping_nbest:
+            print("Early stopping now.")
+            break
+
+
+if early_stopping_enabled:
+    print("Copying current best model")
+    best_model = args.output + args.early_stopping_best_model_prefix + ".pyrnn.gz"
+    import shutil
+    shutil.copy(early_stopping_best_model, best_model)
+    print("Wrote best model with error rate %f to '%s'" % (early_stopping_best_error, best_model))

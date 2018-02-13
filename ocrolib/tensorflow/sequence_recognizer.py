@@ -121,7 +121,6 @@ class SequenceRecognizer:
 
     def trainSequence(self,xs,cs,update=1,key=None):
         "Train with an integer sequence of codes."
-        print(len(xs[0]), len(cs[0]))
         for x in xs: assert(x.shape[-1] == self.Ni, "wrong image height")
         start_time = time.time()
         cost, self.outputs, ler, decoded = self.model.train_sequence(xs, cs)
