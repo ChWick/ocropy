@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 from ocrolib.prediction_utils import process_model, greedy_decode, load_gt
 from collections import Counter
 import pickle
+import time
 
 parser = argparse.ArgumentParser()
 
@@ -16,6 +17,8 @@ parser.add_argument("--threads", default=1, type=int,
                     help="The number of threads in the global threads pool!")
 parser.add_argument("--max_parallel_models", default=10, type=int,
                     help="The maximum amount of models that are run in parallel")
+parser.add_argument("--timing", default=False, action="store_true",
+                    help="Output the total time required for evaluation.")
 # evaluation setup
 parser.add_argument("-m", "--models", nargs="+", type=str, required=True,
                     help="The models to evaluate")
@@ -51,6 +54,9 @@ parser.add_argument("--batch_size", default=100, type=int,
                     help="Batch size of the prediction")
 
 args = parser.parse_args()
+
+total_start_time = time.time()
+
 if args.output:
     args.output = os.path.expanduser(args.output)
     if not os.path.exists(args.output):
@@ -109,8 +115,12 @@ models = [
     for m in models
 ]
 
-pool = multiprocessing.pool.ThreadPool(processes=min(args.max_parallel_models, len(models)))
-output = pool.map(process_model, [(model, inputs) for model in models])
+if args.max_parallel_models == 1:
+    output = list(map(process_model, [(model, inputs) for model in models]))
+else:
+    pool = multiprocessing.pool.ThreadPool(processes=min(args.max_parallel_models, len(models)))
+    output = pool.map(process_model, [(model, inputs) for model in models])
+    pool.close()
 #pickle.dump(output, open(os.path.expanduser("~/test.dump"), 'w'))
 #output = pickle.load(open(os.path.expanduser("~/test.dump"), 'r'))
 codecs = [c for _, c in output]
@@ -252,3 +262,7 @@ else:
                     + [str(sum([score[0] for score in scores]) / len(scores))] \
                     + list(map(str, voted_eval)))
         print(s)
+
+
+if args.timing:
+    print("Total time required %f s" % (time.time() - total_start_time))

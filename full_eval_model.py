@@ -9,6 +9,8 @@ import time
 parser = argparse.ArgumentParser()
 
 # global setup
+parser.add_argument("--dry_run", action="store_true",
+                    help="Only print the run commands of crossfold computation, but do not execute them")
 parser.add_argument("--run", type=str, default="",
                     help="All scripts commands will be passed to this command. {threads} will be replaced with the "
                          "number of threads that are required for a single specific task. "
@@ -18,24 +20,39 @@ parser.add_argument("--python", type=str, default="python2",
 parser.add_argument("--skip_train", action="store_true")
 parser.add_argument("--skip_test", action="store_true")
 parser.add_argument("--skip_eval", action="store_true")
+parser.add_argument("--load_pretrained", type=str,
+                    help="Load a pretrained model")
+parser.add_argument("--estimate_n_train", action="store_true",
+                    help="Estimate the maximum numbers of iterations for training")
+parser.add_argument("--n_train", type=int, default=100000,
+                    help="The maximum training iterations. That is the upper limit for early stopping.")
 
 # folds setup
 parser.add_argument("--root_dirs", type=str, required=True, nargs="+",
                     help="Expects Train and Eval dir as sub dir")
 parser.add_argument('--network', type=str, required=True,
                     help="Network structure that shall be used for training. Eg. 'cnn=60:3x3,pool=2x2,lstm=100")
+parser.add_argument('--n_lines', nargs="+", type=int, default=[60, 100, 150, 250, 500, 1000],
+                    help="The lines that shall be used for training")
 
 
 # parse args and clean data
 args = parser.parse_args()
 
 ocropus_crossfold_args = []
+if args.dry_run:
+    ocropus_crossfold_args.append("--dry_run")
 if args.skip_train:
     ocropus_crossfold_args.append("--skip_train")
 if args.skip_test:
     ocropus_crossfold_args.append("--skip_test")
 if args.skip_eval:
     ocropus_crossfold_args.append("--skip_eval")
+
+
+ocropus_crossfold_load_model_args = []
+if args.load_pretrained:
+    ocropus_crossfold_load_model_args = ["--load", args.load_pretrained, "--load_pretrained"]
 
 
 args.root_dirs = [os.path.abspath(os.path.expanduser(rd)) for rd in args.root_dirs]
@@ -75,11 +92,15 @@ def run(command, process_out_list=[]):
 
 
 def iters_for_lines(lines):
-    return int(np.interp(lines, [60, 100, 150, 250, 500, 1000], [10000, 13000, 15000, 20000, 25000, 30000]))
+    if args.estimate_n_train:
+        return int(np.interp(lines, [60, 100, 150, 250, 500, 1000], [10000, 13000, 15000, 20000, 25000, 30000]))
+    else:
+        return args.n_train
 
 
 def line_dirs_for_train_dir(train_dir):
-    line_dirs_ = [d for d in os.listdir(train_dir) if os.path.isdir(os.path.join(train_dir, d)) and int(d)]
+    #line_dirs_ = [d for d in os.listdir(train_dir) if os.path.isdir(os.path.join(train_dir, d)) and int(d)]
+    line_dirs_ = list(map(str, args.n_lines))
     line_dirs_ = sorted(line_dirs_, key=lambda k: int(k))
     print("Found line dirs %s" % line_dirs_)
     if len(line_dirs_) == 0:
@@ -101,7 +122,8 @@ def run_single(run_params):
         "--network", run_params["network"],
         "--run", run_params["run"],
         "--python", args.python,
-        ] + ocropus_crossfold_args):
+        "--verbose",
+        ] + ocropus_crossfold_args + ocropus_crossfold_load_model_args):
 
         print(line)
 

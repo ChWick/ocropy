@@ -28,27 +28,10 @@ class Model:
             "use_peepholes": False,
             "ctc_merge_repeated": False,
             "dropout": False,
+            "solver": "Adam",
+            "l_rate": 1e-3,
+            "momentum": 0.9,
         }
-
-    @staticmethod
-    def write_model_settings(model_settings):
-        out_parts = []
-        for layer in model_settings["layers"]:
-            if layer["type"] == "cnn":
-                out_parts.append("cnn_%d_%dx%d" % (layer["filters"], layer["kernel_size"][0], layer["kernel_size"][1]))
-            elif layer["type"] == "pool":
-                out_parts.append("pool_%dx%d:%dx%d" % (layer["kernel_size"][0], layer["kernel_size"][1], layer["stride"][0], layer["stride"][1]))
-            elif layer["type"] == "lstm":
-                out_parts.append("lstm_%d" % (layer["hidden"], ))
-            else:
-                raise Exception("Unknown layer type '%s'" % layer["type"])
-
-        for flag in ["use_peepholes", "ctc_merge_repeated", "dropout"]:
-            out_parts.append("%s_%s" % (flag, ("false", "true")[model_settings[flag]]))
-
-        return "__".join(out_parts)
-
-
 
     @staticmethod
     def parse_model_settings(str):
@@ -61,13 +44,22 @@ class Model:
             "ctc_merge_repeated": True,
             "use_peepholes": False,
             "dropout": False,
+            "solver": "Adam",
+            "l_rate": 1e-3,
+            "momentum": 0.9,
             "layers": model,
         }
         for param in params:
             label, value = tuple(param.split("="))
             flags = ["use_peepholes", "ctc_merge_repeated", "dropout"]
+            strs = ["solver"]
+            floats = ["l_rate", "momentum"]
             if label in flags:
                 params_dict[label] = value.lower == "true"
+            elif label in strs:
+                params_dict[label] = value
+            elif label in floats:
+                params_dict[label] = float(value)
             elif label == "lstm":
                 lstm = {
                     "type": "lstm",
@@ -226,16 +218,19 @@ class Model:
                                             [batch_size, tf.shape(layers[-1])[1],
                                              last_num_filters * lstm_num_features])
 
+
+                    lstm_num_features = last_num_filters * lstm_num_features
                 else:
                     rnn_inputs = inputs
                     lstm_seq_len = seq_len
+                    lstm_num_features = num_features
 
                 lstm_layers = [l for l in model_settings["layers"] if l['type'] == "lstm"]
 
                 if len(lstm_layers) > 0:
-                    def get_lstm_cell(num_hidden, use_peepholse=model_settings["use_peepholes"]):
+                    def get_lstm_cell(num_hidden, use_peepholes=model_settings["use_peepholes"]):
                         return LSTMCell(num_hidden,
-                                        use_peepholes=use_peepholse,
+                                        use_peepholes=use_peepholes,
                                         reuse=reuse_variables,
                                         initializer=tf.initializers.random_uniform(-0.1, 0.1),
                                         #cell_clip=20,
@@ -252,7 +247,7 @@ class Model:
 
                     output_size = lstm_layers[-1]["hidden"] * 2
                 else:
-                    raise Exception("Currently unsupported: no lstm layer")
+                    output_size = lstm_num_features
 
                 outputs = rnn_inputs
 
@@ -279,10 +274,7 @@ class Model:
                 # ctc predictions
                 loss = ctc_ops.ctc_loss(targets,
                                         time_major_logits,
-                                        lstm_seq_len,
-                                        time_major=True,
-                                        ctc_merge_repeated=model_settings["ctc_merge_repeated"],
-                                        ignore_longer_outputs_than_inputs=True)
+                                        lstm_seq_len, time_major=True, ctc_merge_repeated=model_settings["ctc_merge_repeated"], ignore_longer_outputs_than_inputs=True)
                 decoded, log_prob = ctc_ops.ctc_greedy_decoder(time_major_logits, lstm_seq_len, merge_repeated=model_settings["ctc_merge_repeated"])
                 #decoded, log_prob = ctc_ops.ctc_beam_search_decoder(time_major_logits, lstm_seq_len, merge_repeated=model_settings["merge_repeated"])
                 decoded = decoded[0]
@@ -295,7 +287,13 @@ class Model:
 
 
                 cost = tf.reduce_mean(loss, name='cost')
-                optimizer = tf.train.AdamOptimizer(1e-3)
+                if model_settings["solver"] == "Momentum":
+                    optimizer = tf.train.MomentumOptimizer(model_settings["l_rate"], model_settings["momentum"])
+                elif model_settings["solver"] == "Adam":
+                    optimizer = tf.train.AdamOptimizer(model_settings["l_rate"])
+                else:
+                    raise Exception("Unknown solver of type '%s'" % model_settings["solver"])
+
                 #optimizer = tf.train.MomentumOptimizer(1e-3, 0.9)
                 # train_op = tf.train.GradientDescentOptimizer(learning_rate).minimize(cost, name='optimizer')
                 gvs = optimizer.compute_gradients(cost)
@@ -332,7 +330,9 @@ class Model:
 
     def load_weights(self, model_file):
         with self.graph.as_default() as g:
-            all_var_names = [v for v in tf.global_variables() if not v.name.startswith("W") and not v.name.startswith("B")]
+            all_var_names = [v for v in tf.global_variables()
+                             if not v.name.startswith("W:") and not v.name.startswith("B:")
+                             and "Adam" not in v.name and "beta1_power" not in v.name and "beta2_power" not in v.name]
             print(all_var_names)
             saver = tf.train.Saver(all_var_names)
 
