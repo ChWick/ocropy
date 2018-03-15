@@ -977,6 +977,3 @@ def getstates_for_display(net):
         return net.nets[0].state[:net.nets[0].last_n]
     return None
 
-
-from ocrolib.codec import Codec
-# keep this import to support older codec definitions

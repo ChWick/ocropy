@@ -248,7 +248,7 @@ if args.load:
 else:
     last_save = None
     if args.tensorflow:
-        import ocrolib.tfmodel as tf_backend
+        import ocrolib.tensorflow as tf_backend
         network = tf_backend.SequenceRecognizer(args.height,
                                                 model_settings=tensorflow_model.Model.parse_model_settings(args.network),
                                                 codec=codec, normalize=lstm.normalize_nfkc, threads=args.threads)
@@ -277,12 +277,10 @@ if args.updates: network.lstm.verbose = 1
 
 # used for plotting
 
-if args.display > 0:
-    import matplotlib.pyplot as plt
-    plt.ion()
-    plt.rc('xtick',labelsize=7)
-    plt.rc('ytick',labelsize=7)
-    plt.rcParams.update({"font.size":7})
+plt.ion()
+plt.rc('xtick',labelsize=7)
+plt.rc('ytick',labelsize=7)
+plt.rcParams.update({"font.size":7})
 
 
 def cleandisp(s):
