@@ -178,6 +178,7 @@ if args.output:
 def compute_voting(output, voter_type):
     import ocrolib.voters.sequence_voter as sequence_voter
     import ocrolib.voters.probability_voter as probability_voter
+    import ocrolib.voters.confidence_voter as confidence_voter
 
     print("Running voting")
     if len(output) == 0:
@@ -203,6 +204,12 @@ def compute_voting(output, voter_type):
             voted = sequence_voter.process_text(model_predictions, True, -1)
         elif voter_type == "prob":
             voted = probability_voter.decode_probs(model_probs, codecs, ctc_merge_repeated=True)
+        elif voter_type == "default_confidence":
+            voted = confidence_voter.default_vote(model_probs, codecs)
+        elif voter_type == "fuzzy_confidence":
+            voted = confidence_voter.fuzzy_vote(model_probs, codecs)
+        else:
+            raise Exception("Unknown voter type '{}'".format(voter_type))
 
         err, cs = ocrolib.edist.xlevenshtein(voted, gt, context=args.context)
 
@@ -251,7 +258,7 @@ else:
 
             return voted_err
 
-        voted_eval = map(run_vote, ["prob", "sequence"])
+        voted_eval = map(run_vote, ["prob", "sequence", "default_confidence", "fuzzy_confidence"])
     else:
         print("No voting required")
 

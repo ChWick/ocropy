@@ -1,9 +1,36 @@
 import tensorflow as tf
+from tensorflow.python.framework import ops
+from tensorflow.python.ops import array_ops
+from tensorflow.python.ops.nn_grad import _BroadcastMul
 from tensorflow.python.ops import rnn
 from tensorflow.contrib.rnn import LSTMCell, MultiRNNCell, DropoutWrapper
+from tensorflow.python.framework import sparse_tensor
 from tensorflow.python.ops import ctc_ops
 import numpy as np
 import re
+
+# try to load fuzzy decoder
+try:
+    fuzzy_module = tf.load_op_library("/home/ls6/wick/Documents/Projects/tensorflow/bazel-bin/tensorflow/core/user_ops/fuzzy_ctc_op.so")
+
+    @ops.RegisterGradient("FuzzyCTCLoss")
+    def _FuzzyCTCLossGrad(op, grad_loss, _):
+        grad_without_gradient = array_ops.prevent_gradient(
+            op.outputs[1], message="Currently there is no way to take the second "
+                                   " derivative of ctc_loss due to the fused implementation's interaction "
+                                   " with tf.gradients()")
+        return [_BroadcastMul(grad_loss, grad_without_gradient), None, None, None]
+
+
+    def fuzzy_ctc_greedy_decoder(inputs, sequence_length):
+        outputs = fuzzy_module.fuzzy_ctc_greedy_decoder(inputs, sequence_length)
+        (decoded_ix, decoded_val, decoded_shape, log_probabilities) = outputs
+        return ([sparse_tensor.SparseTensor(decoded_ix, decoded_val, decoded_shape)],
+                log_probabilities)
+
+except Exception as e:
+    print(e)
+    pass
 
 
 class Model:
@@ -29,6 +56,7 @@ class Model:
             "ctc_merge_repeated": False,
             "dropout": False,
             "solver": "Adam",
+            "ctc": "Default",
             "l_rate": 1e-3,
             "momentum": 0.9,
         }
@@ -45,6 +73,7 @@ class Model:
             "use_peepholes": False,
             "dropout": False,
             "solver": "Adam",
+            "ctc": "Default",
             "l_rate": 1e-3,
             "momentum": 0.9,
             "layers": model,
@@ -52,10 +81,10 @@ class Model:
         for param in params:
             label, value = tuple(param.split("="))
             flags = ["use_peepholes", "ctc_merge_repeated", "dropout"]
-            strs = ["solver"]
+            strs = ["solver", "ctc"]
             floats = ["l_rate", "momentum"]
             if label in flags:
-                params_dict[label] = value.lower == "true"
+                params_dict[label] = value.lower() == "true"
             elif label in strs:
                 params_dict[label] = value
             elif label in floats:
@@ -104,7 +133,6 @@ class Model:
                 else:
                     stride = kernel_size
 
-
                 pool = {
                     "type": "pool",
                     "kernel_size": kernel_size,
@@ -122,7 +150,7 @@ class Model:
         graph = tf.Graph()
         with graph.as_default() as g:
             session = tf.Session(graph=graph,
-                                 config=tf.ConfigProto(intra_op_parallelism_threads=threads,
+                                 config=tf.ConfigProto(intra_op_parallelism_threads=1,
                                                        inter_op_parallelism_threads=threads,
                                                        #session_inter_op_thread_pool=[{'num_threads': threads}],
                                                        #use_per_session_threads=True,
@@ -169,7 +197,7 @@ class Model:
         graph = tf.Graph()
         with graph.as_default():
             session = tf.Session(graph=graph,
-                                 config=tf.ConfigProto(intra_op_parallelism_threads=threads,
+                                 config=tf.ConfigProto(intra_op_parallelism_threads=1,
                                                        inter_op_parallelism_threads=threads,
                                                        ))
 
@@ -181,7 +209,11 @@ class Model:
             dropout_rate = tf.placeholder(tf.float32, shape=(), name="dropout_rate")
 
             with tf.variable_scope("", reuse=reuse_variables) as scope:
-                has_conv_or_pool = model_settings["layers"][0]["type"] != "lstm"
+                no_layers = len(model_settings["layers"]) == 0
+                if not no_layers:
+                    has_conv_or_pool = model_settings["layers"][0]["type"] != "lstm"
+                else:
+                    has_conv_or_pool = False
 
                 if has_conv_or_pool:
                     cnn_inputs = tf.reshape(inputs, [batch_size, -1, num_features, 1])
@@ -208,8 +240,8 @@ class Model:
                                 padding="same",
                             ))
 
-                            shape = (tf.to_int32(shape[0] / model["kernel_size"][0]),
-                                     shape[1] / model["kernel_size"][1])
+                            shape = (tf.to_int32(shape[0] / model["stride"][0]),
+                                     shape[1] / model["stride"][1])
                         else:
                             raise Exception("Unknown layer of type %s" % model["type"])
 
@@ -230,6 +262,7 @@ class Model:
                 if len(lstm_layers) > 0:
                     def get_lstm_cell(num_hidden, use_peepholes=model_settings["use_peepholes"]):
                         return LSTMCell(num_hidden,
+                                        forget_bias=1.0,
                                         use_peepholes=use_peepholes,
                                         reuse=reuse_variables,
                                         initializer=tf.initializers.random_uniform(-0.1, 0.1),
@@ -267,16 +300,22 @@ class Model:
 
                 softmax = tf.nn.softmax(logits, -1, "softmax")
 
-
-                # time major (required for ctc decoder)
-                time_major_logits = tf.transpose(logits, (1, 0, 2), name='time_major_logits')
-
                 # ctc predictions
-                loss = ctc_ops.ctc_loss(targets,
-                                        time_major_logits,
-                                        lstm_seq_len, time_major=True, ctc_merge_repeated=model_settings["ctc_merge_repeated"], ignore_longer_outputs_than_inputs=True)
-                decoded, log_prob = ctc_ops.ctc_greedy_decoder(time_major_logits, lstm_seq_len, merge_repeated=model_settings["ctc_merge_repeated"])
-                #decoded, log_prob = ctc_ops.ctc_beam_search_decoder(time_major_logits, lstm_seq_len, merge_repeated=model_settings["merge_repeated"])
+                if model_settings["ctc"] == "Default":
+                    # time major (required for ctc decoder)
+                    time_major_logits = tf.transpose(logits, (1, 0, 2), name='time_major_logits')
+
+                    loss = ctc_ops.ctc_loss(targets,
+                                            time_major_logits,
+                                            lstm_seq_len, time_major=True, ctc_merge_repeated=model_settings["ctc_merge_repeated"], ignore_longer_outputs_than_inputs=True)
+                    decoded, log_prob = ctc_ops.ctc_greedy_decoder(time_major_logits, lstm_seq_len, merge_repeated=model_settings["ctc_merge_repeated"])
+                    # decoded, log_prob = ctc_ops.ctc_beam_search_decoder(time_major_logits, lstm_seq_len, merge_repeated=model_settings["merge_repeated"])
+                elif model_settings["ctc"] == "Fuzzy":
+                    loss, deltas = fuzzy_module.fuzzy_ctc_loss(logits, targets.indices, targets.values, lstm_seq_len)
+                    decoded, log_prob = fuzzy_ctc_greedy_decoder(softmax, lstm_seq_len)
+                else:
+                    raise Exception("Unknown ctc model: '%s'. Supported are Default and Fuzzy" % model_settings['ctc'])
+
                 decoded = decoded[0]
                 sparse_decoded = (
                     tf.identity(decoded.indices, name="decoded_indices"),
@@ -297,7 +336,7 @@ class Model:
                 #optimizer = tf.train.MomentumOptimizer(1e-3, 0.9)
                 # train_op = tf.train.GradientDescentOptimizer(learning_rate).minimize(cost, name='optimizer')
                 gvs = optimizer.compute_gradients(cost)
-                capped_gvs = [(tf.clip_by_value(grad, -10., 10.), var) for grad, var in gvs]
+                #capped_gvs = [(tf.clip_by_value(grad, -10., 10.), var) for grad, var in gvs]
                 train_op = optimizer.apply_gradients(gvs, name='train_op')
 
                 ler = tf.reduce_mean(tf.edit_distance(tf.cast(decoded, tf.int32), targets), name='ler')

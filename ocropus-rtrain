@@ -10,7 +10,6 @@ import argparse
 import sys
 
 import numpy as np
-import matplotlib.pyplot as plt
 
 import ocrolib
 import ocrolib.lstm as lstm
@@ -19,7 +18,7 @@ from ocrolib import lineest
 import traceback
 import time
 from multiprocessing import Pool
-import ocrolib.tensorflow.model as tensorflow_model
+import ocrolib.tfmodel.model as tensorflow_model
 
 np.seterr(divide='raise',over='raise',invalid='raise',under='ignore')
 
@@ -249,7 +248,7 @@ if args.load:
 else:
     last_save = None
     if args.tensorflow:
-        import ocrolib.tensorflow as tf_backend
+        import ocrolib.tfmodel as tf_backend
         network = tf_backend.SequenceRecognizer(args.height,
                                                 model_settings=tensorflow_model.Model.parse_model_settings(args.network),
                                                 codec=codec, normalize=lstm.normalize_nfkc, threads=args.threads)
@@ -278,10 +277,12 @@ if args.updates: network.lstm.verbose = 1
 
 # used for plotting
 
-plt.ion()
-plt.rc('xtick',labelsize=7)
-plt.rc('ytick',labelsize=7)
-plt.rcParams.update({"font.size":7})
+if args.display > 0:
+    import matplotlib.pyplot as plt
+    plt.ion()
+    plt.rc('xtick',labelsize=7)
+    plt.rc('ytick',labelsize=7)
+    plt.rcParams.update({"font.size":7})
 
 
 def cleandisp(s):
@@ -349,15 +350,15 @@ def load_data(fname):
         return fname, None, None, None
 
 
-thread_pool = Pool(processes=args.threads)
 
 
+thread_pool = Pool(processes=max(1, args.threads))
 loaded_validation_data = []
 loaded_data = {}
 if args.preload:
     print("Preloading data, this might take a while")
     if args.threads > 1:
-        data = thread_pool.map_async(load_data, inputs).get(9999999)
+        data = thread_pool.map(load_data, inputs)
     else:
         data = map(load_data, inputs)
 
@@ -373,7 +374,7 @@ if args.preload:
 if early_stopping_enabled:
     print("Preloading validation data for early stopping, this might take a while")
     if args.threads > 1:
-        data = thread_pool.map_async(load_data, args.validation).get(9999999)
+        data = thread_pool.map(load_data, args.validation)
     else:
         data = map(load_data, args.validation)
 
@@ -416,7 +417,7 @@ for trial in range(start,args.ntrain):
             data = [loaded_data[name] for name in fname]
         elif args.batch_size > 1 and args.threads > 1:
             # workaround to support keyboard interrupt
-            data = thread_pool.map_async(load_data, fname).get(9999999)
+            data = thread_pool.map(load_data, fname)
             # data = thread_pool.map(load_data, fname)
         else:
             # not parallel
@@ -449,9 +450,9 @@ for trial in range(start,args.ntrain):
     #gta = "".join(codec.decode(acs))
     if not args.quiet:
         print("%d %.6f %.6f %s" % (trial, np.mean(network.error_log), np.mean(network.cerror_log), line.shape), fname[0])
-        print("   TRU:", repr(transcript))
+        print("   TRU: %s" % repr(transcript))
         #print("   ALN:", repr(gta[:len(transcript)+5]))
-        print("   OUT:", repr(pred[:len(transcript)+5]))
+        print("   OUT: %s" % repr(pred[:len(transcript)+5]))
 
     pred = re.sub(' ','_',pred)
     #gta = re.sub(' ','_',gta)
@@ -508,7 +509,11 @@ for trial in range(start,args.ntrain):
                 total_err += ocrolib.edist.levenshtein(txt, trans)
                 total_chars += len(trans)
 
-        error_rate = float(total_err) / total_chars
+        if total_chars > 0:
+            error_rate = float(total_err) / total_chars
+        else:
+            error_rate = 1
+
         print(" * Got error rate of %f" % error_rate)
         if error_rate < early_stopping_best_error:
             early_stopping_best_error = error_rate
@@ -536,6 +541,6 @@ if early_stopping_enabled:
     for model_file in model_files:
         # expected model ends with .pyrnn.gz*, '*' is tensorflow additional data
         ext = model_file[model_file.rfind(".pyrnn.gz"):]
-        best_model = args.output + ext
+        best_model = args.output + args.early_stopping_best_model_prefix + ext
         shutil.copy(model_file, best_model)
         print("Wrote best model with error rate %f to '%s'" % (early_stopping_best_error, best_model))

@@ -229,7 +229,7 @@ def train_single_fold(fold_dir):
                         [args.python, args.rtrain, tensorflow_arg,
                          "--preload",
                          "--network", args.network,
-                         "--threads", "1",
+                         "--threads", "0",
                          ] + early_stopping_args + [
                          # "--batch_size", 1,
                          "--ntrain", str(args.ntrain),

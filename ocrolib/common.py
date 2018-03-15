@@ -20,8 +20,12 @@ from ocrolib.exceptions import (BadClassLabel, BadInput, FileNotFound,
 import numpy
 from numpy import (amax, amin, array, bitwise_and, clip, dtype, mean, minimum,
                    nan, sin, sqrt, zeros)
-import pylab
-from pylab import (clf, cm, ginput, gray, imshow, ion, subplot, where)
+try:
+    import pylab
+    from pylab import (clf, cm, ginput, gray, imshow, ion, subplot, where)
+except:
+    pass
+
 from scipy.ndimage import morphology, measurements
 import PIL
 
@@ -113,15 +117,15 @@ def write_text(fname,text,nonl=0,normalize=1):
 
 def pil2array(im,alpha=0):
     if im.mode=="L":
-        a = numpy.fromstring(im.tobytes(),'B')
+        a = numpy.frombuffer(im.tobytes(),'B')
         a.shape = im.size[1],im.size[0]
         return a
     if im.mode=="RGB":
-        a = numpy.fromstring(im.tobytes(),'B')
+        a = numpy.frombuffer(im.tobytes(),'B')
         a.shape = im.size[1],im.size[0],3
         return a
     if im.mode=="RGBA":
-        a = numpy.fromstring(im.tobytes(),'B')
+        a = numpy.frombuffer(im.tobytes(),'B')
         a.shape = im.size[1],im.size[0],4
         if not alpha: a = a[:,:,:3]
         return a

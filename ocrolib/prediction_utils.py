@@ -4,7 +4,7 @@ import numpy as np
 from click import progressbar
 
 def load_network(model):
-    import ocrolib.tensorflow as tf_backend
+    import ocrolib.tfmodel as tf_backend
     network = tf_backend.SequenceRecognizer.load(model["path"], threads=model["global_threads"])
 
     lnorm = getattr(network, "lnorm", None)

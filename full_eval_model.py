@@ -26,6 +26,8 @@ parser.add_argument("--estimate_n_train", action="store_true",
                     help="Estimate the maximum numbers of iterations for training")
 parser.add_argument("--n_train", type=int, default=100000,
                     help="The maximum training iterations. That is the upper limit for early stopping.")
+parser.add_argument("--single_fold", type=str,
+                    help="If a positive number only run the specific fold, instead of all")
 
 # folds setup
 parser.add_argument("--root_dirs", type=str, required=True, nargs="+",
@@ -48,6 +50,8 @@ if args.skip_test:
     ocropus_crossfold_args.append("--skip_test")
 if args.skip_eval:
     ocropus_crossfold_args.append("--skip_eval")
+if args.single_fold:
+    ocropus_crossfold_args += ["--single_fold", args.single_fold]
 
 
 ocropus_crossfold_load_model_args = []

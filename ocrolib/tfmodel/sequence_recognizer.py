@@ -36,7 +36,7 @@ class SequenceRecognizer:
                  threads=1):
         self.Ni = Ni
         if codec: No = codec.size()
-        self.No = No + 1
+        self.No = No
         self.debug_align = 0
         self.normalize = normalize
         self.codec = codec
@@ -135,11 +135,11 @@ class SequenceRecognizer:
 
         self.aligned = decoded[0]
 
-        self.error = cost
-        self.error_log.append(cost)
+        self.error = cost ** .5 / len(cs)
+        self.error_log.append(self.error)
         # compute class error
         self.cerror = ler
-        self.cerror_log.append(ler)
+        self.cerror_log.append(self.cerror)
 
         if len(self.error_log) > self.error_log_max_size:
             del self.error_log[0]
